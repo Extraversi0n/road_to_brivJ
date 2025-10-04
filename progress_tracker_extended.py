@@ -3,16 +3,20 @@
 
 import os
 import re
+import sys
 import json
 import requests
 from PIL import Image, ImageDraw, ImageFont
 from datetime import datetime
 
-# === CONFIG ===
-LOG_PATH = r"C:/IdleChampions/IdleChampions/IdleDragons_Data/StreamingAssets/downloaded_files/webRequestLog.txt"
+# =========================
+# CONFIG (Defaults)
+# =========================
+LOG_PATH    = r"C:/IdleChampions/IdleChampions/IdleDragons_Data/StreamingAssets/downloaded_files/webRequestLog.txt"
 OUTPUT_PATH = "overlay_extended.png"
+GOAL_BSC    = 15_360_005  # target in BSC units
 
-FONT_MED_PATH = "arial.ttf"
+FONT_MED_PATH   = "arial.ttf"
 FONT_SMALL_PATH = "arial.ttf"
 
 IMG_WIDTH   = 950
@@ -35,15 +39,135 @@ COLOR_SILVER    = (192, 192, 192)   # Silver
 COLOR_GEMS      = (100, 200, 150)   # Gems = old BSC base green
 COLOR_BSC_BASE  = ( 80, 170, 255)   # NEW BSC base color (distinct blue)
 
-
 # English month names (stable regardless of OS locale)
 MONTHS_EN = ["", "January", "February", "March", "April", "May", "June",
              "July", "August", "September", "October", "November", "December"]
 
-# Goals
-GOAL_BSC    = 15_360_005   # target in BSC units
+# =========================
+# ALWAYS-SHOW SETUP DIALOG (with Skip)
+# =========================
+CONFIG_FILE = "tracker_config.json"
 
-# === UTILS ===
+def load_config():
+    try:
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+def save_config(cfg: dict):
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+
+def show_config_dialog(defaults: dict):
+    """Show Tk dialog every run; 'Skip' uses saved defaults if available."""
+    try:
+        import tkinter as tk
+        from tkinter import filedialog, messagebox
+    except Exception:
+        # No Tk available? Just use defaults.
+        return defaults or {}
+
+    root = tk.Tk()
+    root.title("IdleChamps Overlay – Settings")
+    root.resizable(False, False)
+
+    # Pre-fill with saved/default values or script defaults:
+    v_log  = tk.StringVar(value=defaults.get("log_path", LOG_PATH))
+    v_goal = tk.StringVar(value=str(defaults.get("goal_bsc", GOAL_BSC)))
+    v_out  = tk.StringVar(value=defaults.get("output_path", OUTPUT_PATH))
+    v_rem  = tk.BooleanVar(value=True)  # remember on Save & Run
+
+    def pick_log():
+        p = filedialog.askopenfilename(
+            title="Select webRequestLog.txt",
+            filetypes=[("webRequestLog.txt","webRequestLog.txt"), ("Text files","*.txt"), ("All files","*.*")]
+        )
+        if p: v_log.set(p)
+
+    def pick_out():
+        d = filedialog.askdirectory(title="Select output folder")
+        if d:
+            v_out.set(os.path.join(d, "overlay_extended.png"))
+
+    def validate_goal(text):
+        try:
+            return int(text.replace("_","").strip()) > 0
+        except Exception:
+            return False
+
+    result = {}
+
+    def do_run(save_it: bool):
+        g = v_goal.get().strip()
+        if not validate_goal(g):
+            messagebox.showerror("Invalid goal", "Please enter a positive integer for BSC goal.")
+            return
+        cfg = {
+            "log_path": v_log.get().strip(),
+            "goal_bsc": int(g.replace("_","")),
+            "output_path": v_out.get().strip()
+        }
+        if save_it and v_rem.get():
+            save_config(cfg)
+        result["cfg"] = cfg
+        root.destroy()
+
+    def do_skip():
+        if not defaults:
+            messagebox.showinfo("No saved settings", "No saved settings found yet.")
+            return
+        result["cfg"] = defaults
+        root.destroy()
+
+    def do_cancel():
+        root.destroy()
+        sys.exit(0)
+
+    pad = {"padx": 10, "pady": 6}
+
+    tk.Label(root, text="webRequestLog.txt:").grid(row=0, column=0, sticky="w", **pad)
+    f0 = tk.Frame(root); f0.grid(row=0, column=1, sticky="we", **pad)
+    e0 = tk.Entry(f0, textvariable=v_log, width=48); e0.pack(side="left", fill="x", expand=True)
+    tk.Button(f0, text="Browse…", command=pick_log).pack(side="left", padx=6)
+
+    tk.Label(root, text="BSC Goal:").grid(row=1, column=0, sticky="w", **pad)
+    tk.Entry(root, textvariable=v_goal, width=20).grid(row=1, column=1, sticky="w", **pad)
+
+    tk.Label(root, text="Output image:").grid(row=2, column=0, sticky="w", **pad)
+    f2 = tk.Frame(root); f2.grid(row=2, column=1, sticky="we", **pad)
+    e2 = tk.Entry(f2, textvariable=v_out, width=48); e2.pack(side="left", fill="x", expand=True)
+    tk.Button(f2, text="Folder…", command=pick_out).pack(side="left", padx=6)
+
+    tk.Checkbutton(root, text="Remember these settings", variable=v_rem).grid(row=3, column=1, sticky="w", **pad)
+
+    bf = tk.Frame(root); bf.grid(row=4, column=0, columnspan=2, sticky="e", padx=10, pady=10)
+    btn_skip = tk.Button(bf, text="Skip (use saved)", command=do_skip,
+                         state=("normal" if defaults else "disabled"))
+    btn_skip.pack(side="left", padx=4)
+    tk.Button(bf, text="Run", command=lambda: do_run(save_it=False)).pack(side="left", padx=4)
+    tk.Button(bf, text="Save & Run", command=lambda: do_run(save_it=True)).pack(side="left", padx=4)
+    tk.Button(bf, text="Cancel", command=do_cancel).pack(side="left", padx=4)
+
+    e0.focus_set()
+    root.mainloop()
+
+    return result.get("cfg", defaults or {})
+
+# apply dialog (always shown)
+_saved = load_config()
+_cfg = show_config_dialog(_saved)
+
+# override script defaults with chosen values
+LOG_PATH    = _cfg.get("log_path", LOG_PATH)
+OUTPUT_PATH = _cfg.get("output_path", OUTPUT_PATH)
+GOAL_BSC    = int(_cfg.get("goal_bsc", GOAL_BSC))
+
+# =========================
+# HELPERS
+# =========================
 def extract_value(text, key):
     lines = text.strip().splitlines()[::-1]
     for line in lines:
@@ -87,14 +211,15 @@ def get_nested(d, path, default=None):
     return cur
 
 def _percent(value, goal):
-    # If nothing is needed from this resource, treat it as complete.
     if goal <= 0:
         return "100%"
     p = min(1.0, value / goal) * 100.0
     s = f"{p:.1f}%"
     return s[:-3] + "%" if s.endswith(".0%") else s
 
-# === READ LOG & CALL API ===
+# =========================
+# READ LOG & CALL API
+# =========================
 with open(LOG_PATH, "r", encoding="utf-8") as f:
     log = f.read()
 
@@ -131,11 +256,13 @@ if resp.status_code != 200 or not resp.text.strip().startswith("{"):
     raise Exception(f"Invalid API response: {resp.status_code}")
 data = resp.json()
 
-# === VALUES ===
+# =========================
+# VALUES & CONVERSIONS
+# =========================
 chests = data.get("details", {}).get("chests", {})
-gold   = safe_int(chests.get("2", 0))                  # gold chests (units)
-silver = safe_int(chests.get("1", 0))                  # silver chests (units)
-gems   = safe_int(get_nested(data, "details.red_rubies", 0))  # gems (units)
+gold   = safe_int(chests.get("2", 0))                         # gold chests
+silver = safe_int(chests.get("1", 0))                         # silver chests
+gems   = safe_int(get_nested(data, "details.red_rubies", 0))  # gems
 
 # Base BSC from contract buffs
 BSC_WEIGHTS = {31:1, 32:2, 33:6, 34:24, 1797:120}
@@ -156,8 +283,8 @@ def find_contract_buffs_anywhere(obj):
 def compute_bsc_from_buffs(json_data):
     buff_list = find_contract_buffs_anywhere(json_data)
     total = 0
+    if not buff_list: return 0, {}
     breakdown = {k: 0 for k in BSC_WEIGHTS.keys()}
-    if not buff_list: return 0, breakdown
     for entry in buff_list:
         try:
             b_id = int(entry.get("buff_id", -1))
@@ -171,22 +298,22 @@ def compute_bsc_from_buffs(json_data):
 
 bsc_base, _b = compute_bsc_from_buffs(data)
 
-# Projection to BSC units (for the stacked bar & legend)
-bsc_from_gold   = gold               # 1 gold chest = 1 BSC
+# Convert current resources into BSC units (for the stacked bar & legend)
+bsc_from_gold   = gold               # 1 gold = 1 BSC
 bsc_from_silver = silver // 10       # 10 silver = 1 BSC
 bsc_from_gems   = gems // 500        # 500 gems = 1 BSC
 
-# --- per-resource goals: exclude this resource's own contribution
-gold_needed_bsc   = max(GOAL_BSC - (bsc_base + bsc_from_silver + bsc_from_gems), 0)
-silver_needed_bsc = max(GOAL_BSC - (bsc_base + bsc_from_gold   + bsc_from_gems), 0)
-gems_needed_bsc   = max(GOAL_BSC - (bsc_base + bsc_from_gold   + bsc_from_silver), 0)
+# Overall remaining BSC after ALL contributions (for the stacked bar)
+R_overall = max(GOAL_BSC - (bsc_base + bsc_from_gold + bsc_from_silver + bsc_from_gems), 0)
 
-gold_goal_units   = gold_needed_bsc * 1      # 1 gold chest = 1 BSC
-silver_goal_units = silver_needed_bsc * 10   # 10 silver = 1 BSC
-gems_goal_units   = gems_needed_bsc * 500    # 500 gems = 1 BSC
+# Per-resource goals in units: overall remaining + add back own contribution
+gold_goal_units   = (R_overall + bsc_from_gold)   * 1
+silver_goal_units = (R_overall + bsc_from_silver) * 10
+gems_goal_units   = (R_overall + bsc_from_gems)   * 500
 
-
-# === DRAW ===
+# =========================
+# DRAW
+# =========================
 img_h = PADDING*2 + 4*ROW_HEIGHT + 40
 img = Image.new("RGBA", (IMG_WIDTH, img_h), (0,0,0,0))
 draw = ImageDraw.Draw(img)
@@ -194,7 +321,7 @@ draw = ImageDraw.Draw(img)
 font_med   = ImageFont.truetype(FONT_MED_PATH, 21)
 font_small = ImageFont.truetype(FONT_SMALL_PATH, 15)
 
-# Date only (e.g., "28 September 2025")
+# Date only (e.g., "29 September 2025")
 now = datetime.now()
 date_str = f"{now.day} {MONTHS_EN[now.month]} {now.year}"
 draw.text((PADDING, 6), date_str, font=font_small, fill=(180, 180, 180))
@@ -213,7 +340,7 @@ icon_gems   = try_icon("gems_icon.png")
 icon_bsc    = try_icon("blacksmithcontract_icon.png")
 
 def draw_progress_block(y, value, goal, icon, bar_color, title="", meta_suffix=""):
-    """Generic bar with spacing and outline; title line shows % to goal; meta line shows Remaining/Goal."""
+    """Generic bar with spacing and outline; title shows %; meta shows Remaining/Goal."""
     bar_x = PADDING + (ICON_SIZE[0] + 10 if icon else 0)
     title_y = y
     title_h = 0
@@ -249,7 +376,7 @@ def draw_progress_block(y, value, goal, icon, bar_color, title="", meta_suffix="
     draw.text((bar_x, bar_y + BAR_HEIGHT + 4), meta, font=font_small, fill=(210,210,210))
 
 def draw_stacked_bsc_block(y, segments, goal, title, icon=None):
-    """Stacked BSC bar; title line shows %; legend lists BSC values only."""
+    """Stacked BSC bar; title shows %; legend lists BSC values."""
     bar_x = PADDING + (ICON_SIZE[0] + 10 if icon else 0)
     title_y = y
     title_h = 0
@@ -292,7 +419,7 @@ def draw_stacked_bsc_block(y, segments, goal, title, icon=None):
     draw.text((bar_x + bar_w - w, title_y), pct, font=font_small, fill=(220,220,220))
 
     # simplified legend (BSC values)
-    labels = [f"{lbl} {val:,}".replace(",", ".") for lbl, val, _ in segments]  # "BSC 123 | Gold 45 | Silver 67 | Gems 89"
+    labels = [f"{lbl} {val:,}".replace(",", ".") for lbl, val, _ in segments]
     legend = " | ".join(labels)
     draw.text((bar_x, bar_y + bar_h + LEGEND_GAP), legend, font=font_small, fill=(210,210,210))
 
@@ -301,19 +428,16 @@ def draw_stacked_bsc_block(y, segments, goal, title, icon=None):
     meta = f"Remaining: {remaining:,} • Goal: {goal:,}".replace(",", ".")
     draw.text((bar_x, bar_y + bar_h + LEGEND_GAP + 18), meta, font=font_small, fill=(200,200,200))
 
-# === DRAW BARS ===
+# Draw bars
 y0 = 26
-
-# Build stacked BSC segments (values are in BSC units)
 segments = [
-    ("BSC",   bsc_base,        COLOR_BSC_BASE),  # <-- neue BSC-Base-Farbe
+    ("BSC",   bsc_base,        COLOR_BSC_BASE),
     ("Gold",  bsc_from_gold,   COLOR_GOLD),
     ("Silver",bsc_from_silver, COLOR_SILVER),
-    ("Gems",  bsc_from_gems,   COLOR_GEMS),      # <-- Gems = grün (wie alte Base)
+    ("Gems",  bsc_from_gems,   COLOR_GEMS),
 ]
 
-# Resource bars now show how many UNITS you have vs how many UNITS are needed to close remaining BSC
-# Add a short suffix to clarify unit→BSC factor.
+# Resource bars: current units vs units needed (overall remaining + own contribution)
 draw_progress_block(y0 + 0*ROW_HEIGHT, gold,   gold_goal_units,   icon_gold,   COLOR_GOLD,
                     title="Gold-Chests",   meta_suffix=" (1 = 1 BSC)")
 draw_progress_block(y0 + 1*ROW_HEIGHT, silver, silver_goal_units, icon_silver, COLOR_SILVER,
@@ -323,6 +447,6 @@ draw_progress_block(y0 + 2*ROW_HEIGHT, gems,   gems_goal_units,   icon_gems,   C
 
 draw_stacked_bsc_block(y0 + 3*ROW_HEIGHT, segments, GOAL_BSC, "Blacksmith Contracts", icon=icon_bsc)
 
-# === SAVE ===
+# Save
 img.save(OUTPUT_PATH)
 print(f"✅ Overlay saved as {OUTPUT_PATH}")
