@@ -8,6 +8,9 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,14 +27,14 @@ jobs:
           pip install pyinstaller
 
       - name: Build EXE
-        run: |
-          pyinstaller --onefile --noconsole ^
-            --name IdleChampsOverlay ^
-            --add-data "goldtruhe_icon.png;." ^
-            --add-data "silbertruhe_icon.png;." ^
-            --add-data "gems_icon.png;." ^
-            --add-data "blacksmithcontract_icon.png;." ^
-            progress_tracker_extended.py
+        run: >
+          pyinstaller --onefile --noconsole
+          --name IdleChampsOverlay
+          --add-data "goldtruhe_icon.png;."
+          --add-data "silbertruhe_icon.png;."
+          --add-data "gems_icon.png;."
+          --add-data "blacksmithcontract_icon.png;."
+          progress_tracker_extended.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
