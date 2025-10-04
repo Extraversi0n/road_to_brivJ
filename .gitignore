@@ -1,3 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pdb
+*.egg-info/
+.venv/
+env/
+venv/
+
+# Logs, configs, outputs
+run.log
 tracker_config.json
 overlay_extended.png
-*.bak
+
+# PyInstaller / build
+build/
+dist/
+*.spec
+
+# OS junk
+.DS_Store
+Thumbs.db

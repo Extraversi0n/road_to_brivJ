@@ -1,0 +1,4 @@
+pillow>=10
+requests>=2.31
+# optional but recommended when building an .exe
+certifi>=2024.2.2
