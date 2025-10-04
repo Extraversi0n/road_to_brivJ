@@ -27,6 +27,7 @@ jobs:
           pip install pyinstaller
 
       - name: Build EXE
+        # Keep this as ONE folded line for PowerShell (no ^ line breaks)
         run: >
           pyinstaller --onefile --noconsole
           --name IdleChampsOverlay

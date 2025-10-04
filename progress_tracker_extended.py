@@ -6,8 +6,28 @@ import re
 import sys
 import json
 import requests
-from PIL import Image, ImageDraw, ImageFont
+import certifi
+from pathlib import Path
+from PIL import Image, ImageDraw, ImageFont as _IF
 from datetime import datetime
+
+# =========================
+# PyInstaller helpers (EXE-safe)
+# =========================
+def resource_path(name: str) -> str:
+    """Return path to bundled resource (icons, etc.), works in script and --onefile EXE."""
+    base = getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)
+    return str(Path(base) / name)
+
+def _set_cwd_to_app_dir():
+    """Ensure default outputs (overlay, config) land next to the script/EXE."""
+    try:
+        base = Path(sys.executable if getattr(sys, "frozen", False) else __file__).resolve().parent
+        os.chdir(base)
+    except Exception:
+        pass
+
+_set_cwd_to_app_dir()
 
 # =========================
 # CONFIG (Defaults)
@@ -31,7 +51,7 @@ TITLE_BAR_GAP = 10
 LEGEND_GAP    = 6
 BAR_OUTLINE   = (58, 58, 58)
 SEGMENT_SEPARATOR = (25, 25, 25)
-SHOW_SEG_SEPARATORS = False  # can set True for thin dividers
+SHOW_SEG_SEPARATORS = False  # set True for thin dividers
 
 # Colors
 COLOR_GOLD      = (255, 215,   0)   # Gold
@@ -217,6 +237,21 @@ def _percent(value, goal):
     s = f"{p:.1f}%"
     return s[:-3] + "%" if s.endswith(".0%") else s
 
+def _load_font(path, size):
+    """Load a TTF if available; otherwise fall back to a safe default."""
+    try:
+        if path and os.path.exists(path):
+            return _IF.truetype(path, size)
+        # common system fallbacks
+        for p in (r"C:\Windows\Fonts\arial.ttf",
+                  "/System/Library/Fonts/Supplemental/Arial.ttf",
+                  "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"):
+            if os.path.exists(p):
+                return _IF.truetype(p, size)
+    except Exception:
+        pass
+    return _IF.load_default()
+
 # =========================
 # READ LOG & CALL API
 # =========================
@@ -251,7 +286,7 @@ params = {
 headers = {"User-Agent": "Mozilla/5.0"}
 
 print("🔍 API:", api_url)
-resp = requests.get(api_url, params=params, headers=headers, timeout=30)
+resp = requests.get(api_url, params=params, headers=headers, timeout=30, verify=certifi.where())
 if resp.status_code != 200 or not resp.text.strip().startswith("{"):
     raise Exception(f"Invalid API response: {resp.status_code}")
 data = resp.json()
@@ -318,8 +353,8 @@ img_h = PADDING*2 + 4*ROW_HEIGHT + 40
 img = Image.new("RGBA", (IMG_WIDTH, img_h), (0,0,0,0))
 draw = ImageDraw.Draw(img)
 
-font_med   = ImageFont.truetype(FONT_MED_PATH, 21)
-font_small = ImageFont.truetype(FONT_SMALL_PATH, 15)
+font_med   = _load_font(FONT_MED_PATH, 21)
+font_small = _load_font(FONT_SMALL_PATH, 15)
 
 # Date only (e.g., "29 September 2025")
 now = datetime.now()
@@ -334,10 +369,11 @@ def try_icon(path):
             return None
     return None
 
-icon_gold   = try_icon("goldtruhe_icon.png")
-icon_silver = try_icon("silbertruhe_icon.png")
-icon_gems   = try_icon("gems_icon.png")
-icon_bsc    = try_icon("blacksmithcontract_icon.png")
+# Use resource_path so icons load in EXE
+icon_gold   = try_icon(resource_path("goldtruhe_icon.png"))
+icon_silver = try_icon(resource_path("silbertruhe_icon.png"))
+icon_gems   = try_icon(resource_path("gems_icon.png"))
+icon_bsc    = try_icon(resource_path("blacksmithcontract_icon.png"))
 
 def draw_progress_block(y, value, goal, icon, bar_color, title="", meta_suffix=""):
     """Generic bar with spacing and outline; title shows %; meta shows Remaining/Goal."""
@@ -438,14 +474,23 @@ segments = [
 ]
 
 # Resource bars: current units vs units needed (overall remaining + own contribution)
-draw_progress_block(y0 + 0*ROW_HEIGHT, gold,   gold_goal_units,   icon_gold,   COLOR_GOLD,
+def try_icon(path):
+    if path and os.path.exists(path):
+        try:
+            from PIL import Image
+            return Image.open(path).convert("RGBA").resize(ICON_SIZE)
+        except Exception:
+            return None
+    return None
+
+draw_progress_block(y0 + 0*ROW_HEIGHT, gold,   gold_goal_units,   try_icon(resource_path("goldtruhe_icon.png")),   COLOR_GOLD,
                     title="Gold-Chests",   meta_suffix=" (1 = 1 BSC)")
-draw_progress_block(y0 + 1*ROW_HEIGHT, silver, silver_goal_units, icon_silver, COLOR_SILVER,
+draw_progress_block(y0 + 1*ROW_HEIGHT, silver, silver_goal_units, try_icon(resource_path("silbertruhe_icon.png")), COLOR_SILVER,
                     title="Silver-Chests", meta_suffix=" (10 = 1 BSC)")
-draw_progress_block(y0 + 2*ROW_HEIGHT, gems,   gems_goal_units,   icon_gems,   COLOR_GEMS,
+draw_progress_block(y0 + 2*ROW_HEIGHT, gems,   gems_goal_units,   try_icon(resource_path("gems_icon.png")),        COLOR_GEMS,
                     title="Gems",          meta_suffix=" (500 = 1 BSC)")
 
-draw_stacked_bsc_block(y0 + 3*ROW_HEIGHT, segments, GOAL_BSC, "Blacksmith Contracts", icon=icon_bsc)
+draw_stacked_bsc_block(y0 + 3*ROW_HEIGHT, segments, GOAL_BSC, "Blacksmith Contracts", icon=try_icon(resource_path("blacksmithcontract_icon.png")))
 
 # Save
 img.save(OUTPUT_PATH)
