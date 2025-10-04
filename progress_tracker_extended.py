@@ -7,7 +7,9 @@ import sys
 import json
 import requests
 import certifi
+import locale
 from pathlib import Path
+from urllib.parse import urlparse, parse_qsl
 from PIL import Image, ImageDraw, ImageFont as _IF
 from datetime import datetime
 
@@ -28,6 +30,21 @@ def _set_cwd_to_app_dir():
         pass
 
 _set_cwd_to_app_dir()
+
+# =========================
+# Locale (for number formatting)
+# =========================
+try:
+    locale.setlocale(locale.LC_ALL, "")  # user's OS locale
+except Exception:
+    pass
+
+def fmt_int(n: int) -> str:
+    """Format an integer with grouping per OS locale."""
+    try:
+        return locale.format_string("%d", int(n), grouping=True)
+    except Exception:
+        return f"{int(n)}"
 
 # =========================
 # CONFIG (Defaults)
@@ -186,47 +203,8 @@ OUTPUT_PATH = _cfg.get("output_path", OUTPUT_PATH)
 GOAL_BSC    = int(_cfg.get("goal_bsc", GOAL_BSC))
 
 # =========================
-# HELPERS
+# Small helpers
 # =========================
-def extract_value(text, key):
-    """
-    Extracts key=value from messy log lines (URLs, headers, etc.).
-    Stops at &, whitespace, or quotes so it won't grab the whole line.
-    Also supports key="value".
-    Returns the LAST match found in the log (most recent request).
-    """
-    # 1) key="value"
-    pat_quoted = re.compile(rf'{re.escape(key)}\s*=\s*"([^"]+)"')
-
-    # 2) key=value   (stop at &, whitespace, quotes, angle brackets, or #)
-    pat_plain = re.compile(rf'{re.escape(key)}\s*=\s*([^\s&"\'<>#]+)')
-
-    for line in text.strip().splitlines()[::-1]:
-        m = pat_quoted.search(line)
-        if m:
-            return m.group(1)
-        m = pat_plain.search(line)
-        if m:
-            return m.group(1)
-    return None
-
-
-def extract_value_json(text, key):
-    lines = text.strip().splitlines()[::-1]
-    for line in lines:
-        m = re.search(rf'"{re.escape(key)}"\s*:\s*"([^"]+)"', line)
-        if m:
-            return m.group(1)
-    return None
-
-def extract_mobile_client_version(text, default="633"):
-    """Find latest mobile_client_version in the raw log (supports JSON and key=value)."""
-    candidates = []
-    for m in re.finditer(r'"mobile_client_version"\s*:\s*"(\d+)"', text): candidates.append(m.group(1))
-    for m in re.finditer(r'"mobile_client_version"\s*:\s*(\d+)', text):  candidates.append(m.group(1))
-    for m in re.finditer(r'\bmobile_client_version=([0-9]+)', text):      candidates.append(m.group(1))
-    return candidates[-1] if candidates else default
-
 def safe_int(v, default=0):
     try:
         return int(v)
@@ -257,7 +235,7 @@ def _load_font(path, size):
     try:
         if path and os.path.exists(path):
             return _IF.truetype(path, size)
-        # common system fallbacks
+        # system fallbacks
         for p in (r"C:\Windows\Fonts\arial.ttf",
                   "/System/Library/Fonts/Supplemental/Arial.ttf",
                   "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"):
@@ -267,47 +245,110 @@ def _load_font(path, size):
         pass
     return _IF.load_default()
 
+# --- Single-line parsing helpers (new) ---
+def find_latest_getuserdetails_line(text: str) -> str | None:
+    """Return the last log line that contains 'getuserdetails' (case-insensitive)."""
+    for line in reversed(text.splitlines()):
+        if "getuserdetails" in line.lower():
+            return line
+    return None
+
+def extract_post_url_from_line(line: str) -> str | None:
+    """Pull the exact .../post.php URL from the line, if present."""
+    m = re.search(r'(https?://[^\s"\'<>]+/post\.php)', line, flags=re.I)
+    return m.group(1) if m else None
+
+def parse_kv_from_line(line: str) -> dict:
+    """
+    Parse key/value pairs from a single log line:
+    - JSON-like:   "key":"value" or "key":value
+    - URL params:  ...?key=value&key2=value2
+    - Plain pairs: key=value (stops at &, whitespace, quotes, <, >, #)
+    Last occurrence wins.
+    """
+    out = {}
+
+    # JSON-like "key":"value"
+    for k, v in re.findall(r'"([A-Za-z0-9_]+)"\s*:\s*"([^"]+)"', line):
+        out[k] = v
+
+    # JSON-like "key":value (unquoted)
+    for k, v in re.findall(r'"([A-Za-z0-9_]+)"\s*:\s*([A-Za-z0-9_.-]+)', line):
+        out[k] = v
+
+    # key=value plain
+    for k, v in re.findall(r'([A-Za-z0-9_]+)\s*=\s*([^\s&"\'<>#]+)', line):
+        out[k] = v
+
+    # Any URLs? Parse their query strings too
+    for url in re.findall(r'https?://[^\s"\'<>]+', line):
+        try:
+            q = dict(parse_qsl(urlparse(url).query, keep_blank_values=True))
+            out.update(q)
+        except Exception:
+            pass
+
+    return out
+
 # =========================
-# READ LOG & CALL API
+# READ LOG & CALL API (single-line parse)
 # =========================
 with open(LOG_PATH, "r", encoding="utf-8") as f:
-    log = f.read()
+    log_text = f.read()
 
-play_server = extract_value_json(log, "play_server") or extract_value(log, "play_server")
-if play_server:
-    play_server = play_server.replace(r"\/", "/")
+line = find_latest_getuserdetails_line(log_text)
+if not line:
+    raise Exception("Could not find a 'getuserdetails' line in webRequestLog.txt.")
 
-user_id = extract_value_json(log, "internal_user_id") or extract_value(log, "internal_user_id")
-hash_val = extract_value(log, "hash")
-mcv = extract_mobile_client_version(log, default="633")
+# exact post.php URL (if present)
+api_url = extract_post_url_from_line(line)
+if not api_url:
+    # Fallback: reconstruct from play_server on this line
+    m = re.search(r'"play_server"\s*:\s*"([^"]+)"', line) or re.search(r'play_server\s*=\s*([^\s&"\'<>#]+)', line)
+    if not m:
+        raise Exception("Could not determine post.php URL or play_server from the line.")
+    play_server = m.group(1).replace(r"\/", "/")
+    if not play_server.endswith("/"):
+        play_server += "/"
+    api_url = f"{play_server}post.php"
 
-if not all([play_server, user_id, hash_val]):
-    raise Exception("❌ play_server, internal_user_id or hash not found in log!")
+# Parse kv from that single line
+kv = parse_kv_from_line(line)
 
-api_url = f"{play_server}post.php"
+# Required values (last occurrence wins)
+user_id = kv.get("user_id") or kv.get("internal_user_id")
+hash_val = kv.get("hash") or kv.get("hashh")  # accept "hashh" if present
+mcv      = kv.get("mobile_client_version") or "633"
+
+if not user_id or not hash_val:
+    raise Exception("user_id or hash not found on the latest getuserdetails line.")
+
 params = {
     "call": "getuserdetails",
     "user_id": user_id,
     "hash": hash_val,
-    "instance_key": "0",
-    "include_free_play_objectives": "true",
-    "timestamp": "0",
-    "request_id": "0",
-    "language_id": "1",
-    "network_id": "21",
-    "mobile_client_version": mcv,   # dynamic from log
-    "localization_aware": "true"
+    "instance_key": kv.get("instance_key", "0"),
+    "include_free_play_objectives": kv.get("include_free_play_objectives", "true"),
+    "timestamp": kv.get("timestamp", "0"),
+    "request_id": kv.get("request_id", "0"),
+    "language_id": kv.get("language_id", "1"),
+    "network_id": kv.get("network_id", "21"),
+    "mobile_client_version": mcv,
+    "localization_aware": kv.get("localization_aware", "true"),
 }
 headers = {"User-Agent": "Mozilla/5.0"}
 
+# Console-safe print (no emoji crash on cp1252)
 try:
     print("🔍 API:", api_url)
 except UnicodeEncodeError:
     print("API:", api_url)
 
-resp = requests.get(api_url, params=params, headers=headers, timeout=30, verify=certifi.where())
+# Use POST (avoid 414; matches post.php semantics)
+resp = requests.post(api_url, data=params, headers=headers, timeout=30, verify=certifi.where())
 if resp.status_code != 200 or not resp.text.strip().startswith("{"):
-    raise Exception(f"Invalid API response: {resp.status_code}")
+    snippet = resp.text[:200].replace("\n", " ")
+    raise Exception(f"Invalid API response: {resp.status_code} | {snippet}")
 data = resp.json()
 
 # =========================
@@ -383,6 +424,7 @@ draw.text((PADDING, 6), date_str, font=font_small, fill=(180, 180, 180))
 def try_icon(path):
     if path and os.path.exists(path):
         try:
+            from PIL import Image
             return Image.open(path).convert("RGBA").resize(ICON_SIZE)
         except Exception:
             return None
@@ -395,7 +437,7 @@ icon_gems   = try_icon(resource_path("gems_icon.png"))
 icon_bsc    = try_icon(resource_path("blacksmithcontract_icon.png"))
 
 def draw_progress_block(y, value, goal, icon, bar_color, title="", meta_suffix=""):
-    """Generic bar with spacing and outline; title shows %; meta shows Remaining/Goal."""
+    """Generic bar with spacing and outline; title shows %; meta shows Remaining/Goal (localized)."""
     bar_x = PADDING + (ICON_SIZE[0] + 10 if icon else 0)
     title_y = y
     title_h = 0
@@ -425,13 +467,13 @@ def draw_progress_block(y, value, goal, icon, bar_color, title="", meta_suffix="
     w = draw.textlength(pct, font=font_small)
     draw.text((bar_x + BAR_WIDTH - w, title_y), pct, font=font_small, fill=(220, 220, 220))
 
-    # meta line
+    # meta line (localized ints)
     remaining_units = max(goal - value, 0)
-    meta = f"Remaining: {remaining_units:,} • Goal: {goal:,}{meta_suffix}".replace(",", ".")
+    meta = f"Remaining: {fmt_int(remaining_units)} • Goal: {fmt_int(goal)}{meta_suffix}"
     draw.text((bar_x, bar_y + BAR_HEIGHT + 4), meta, font=font_small, fill=(210,210,210))
 
 def draw_stacked_bsc_block(y, segments, goal, title, icon=None):
-    """Stacked BSC bar; title shows %; legend lists BSC values."""
+    """Stacked BSC bar; title shows %; legend lists BSC values (localized)."""
     bar_x = PADDING + (ICON_SIZE[0] + 10 if icon else 0)
     title_y = y
     title_h = 0
@@ -473,18 +515,17 @@ def draw_stacked_bsc_block(y, segments, goal, title, icon=None):
     w = draw.textlength(pct, font=font_small)
     draw.text((bar_x + bar_w - w, title_y), pct, font=font_small, fill=(220,220,220))
 
-    # simplified legend (BSC values)
-    labels = [f"{lbl} {val:,}".replace(",", ".") for lbl, val, _ in segments]
+    # simplified legend (localized BSC values)
+    labels = [f"{lbl} {fmt_int(val)}" for lbl, val, _ in segments]
     legend = " | ".join(labels)
     draw.text((bar_x, bar_y + bar_h + LEGEND_GAP), legend, font=font_small, fill=(210,210,210))
 
-    # remaining + goal under legend
+    # remaining + goal under legend (localized)
     remaining = max(goal - total_bsc, 0)
-    meta = f"Remaining: {remaining:,} • Goal: {goal:,}".replace(",", ".")
+    meta = f"Remaining: {fmt_int(remaining)} • Goal: {fmt_int(goal)}"
     draw.text((bar_x, bar_y + bar_h + LEGEND_GAP + 18), meta, font=font_small, fill=(200,200,200))
 
-# Draw bars
-y0 = 26
+# Build stacked segments (BSC units)
 segments = [
     ("BSC",   bsc_base,        COLOR_BSC_BASE),
     ("Gold",  bsc_from_gold,   COLOR_GOLD),
@@ -492,24 +533,15 @@ segments = [
     ("Gems",  bsc_from_gems,   COLOR_GEMS),
 ]
 
-# Resource bars: current units vs units needed (overall remaining + own contribution)
-def try_icon(path):
-    if path and os.path.exists(path):
-        try:
-            from PIL import Image
-            return Image.open(path).convert("RGBA").resize(ICON_SIZE)
-        except Exception:
-            return None
-    return None
-
-draw_progress_block(y0 + 0*ROW_HEIGHT, gold,   gold_goal_units,   try_icon(resource_path("goldtruhe_icon.png")),   COLOR_GOLD,
+# Draw bars
+y0 = 26
+draw_progress_block(y0 + 0*ROW_HEIGHT, gold,   gold_goal_units,   icon_gold,   COLOR_GOLD,
                     title="Gold-Chests",   meta_suffix=" (1 = 1 BSC)")
-draw_progress_block(y0 + 1*ROW_HEIGHT, silver, silver_goal_units, try_icon(resource_path("silbertruhe_icon.png")), COLOR_SILVER,
+draw_progress_block(y0 + 1*ROW_HEIGHT, silver, silver_goal_units, icon_silver, COLOR_SILVER,
                     title="Silver-Chests", meta_suffix=" (10 = 1 BSC)")
-draw_progress_block(y0 + 2*ROW_HEIGHT, gems,   gems_goal_units,   try_icon(resource_path("gems_icon.png")),        COLOR_GEMS,
+draw_progress_block(y0 + 2*ROW_HEIGHT, gems,   gems_goal_units,   icon_gems,   COLOR_GEMS,
                     title="Gems",          meta_suffix=" (500 = 1 BSC)")
-
-draw_stacked_bsc_block(y0 + 3*ROW_HEIGHT, segments, GOAL_BSC, "Blacksmith Contracts", icon=try_icon(resource_path("blacksmithcontract_icon.png")))
+draw_stacked_bsc_block(y0 + 3*ROW_HEIGHT, segments, GOAL_BSC, "Blacksmith Contracts", icon=icon_bsc)
 
 # Save
 img.save(OUTPUT_PATH)
