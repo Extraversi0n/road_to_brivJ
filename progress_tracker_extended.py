@@ -32,7 +32,7 @@ def _set_cwd_to_app_dir():
 _set_cwd_to_app_dir()
 
 # =========================
-# Locale (for number formatting)
+# Locale (numbers + percentages)
 # =========================
 try:
     locale.setlocale(locale.LC_ALL, "")  # user's OS locale
@@ -45,6 +45,29 @@ def fmt_int(n: int) -> str:
         return locale.format_string("%d", int(n), grouping=True)
     except Exception:
         return f"{int(n)}"
+
+# Percent display style: "dot" | "locale" | "int"
+PERCENT_STYLE = "locale"
+
+def percent_str(value, goal, style=PERCENT_STYLE):
+    """Return a percent string with controlled decimal style (dot/locale/int)."""
+    p = 100.0 if goal <= 0 else min(1.0, value / goal) * 100.0
+
+    if style == "int":
+        return f"{int(round(p))}%"
+
+    # one decimal; trim trailing .0
+    s = f"{p:.1f}"
+    if s.endswith(".0"):
+        s = s[:-2]
+
+    if style == "locale":
+        dec = locale.localeconv().get("decimal_point", ".") or "."
+        s = s.replace(".", dec)
+    else:
+        s = s.replace(",", ".")  # force dot
+
+    return s + "%"
 
 # =========================
 # CONFIG (Defaults)
@@ -223,13 +246,6 @@ def get_nested(d, path, default=None):
             return default
     return cur
 
-def _percent(value, goal):
-    if goal <= 0:
-        return "100%"
-    p = min(1.0, value / goal) * 100.0
-    s = f"{p:.1f}%"
-    return s[:-3] + "%" if s.endswith(".0%") else s
-
 def _load_font(path, size):
     """Load a TTF if available; otherwise fall back to a safe default."""
     try:
@@ -245,20 +261,20 @@ def _load_font(path, size):
         pass
     return _IF.load_default()
 
-# --- Single-line parsing helpers (new) ---
-def find_latest_getuserdetails_line(text: str) -> str | None:
+# --- Single-line parsing helpers ---
+def find_latest_getuserdetails_line(text):
     """Return the last log line that contains 'getuserdetails' (case-insensitive)."""
     for line in reversed(text.splitlines()):
         if "getuserdetails" in line.lower():
             return line
     return None
 
-def extract_post_url_from_line(line: str) -> str | None:
+def extract_post_url_from_line(line):
     """Pull the exact .../post.php URL from the line, if present."""
     m = re.search(r'(https?://[^\s"\'<>]+/post\.php)', line, flags=re.I)
     return m.group(1) if m else None
 
-def parse_kv_from_line(line: str) -> dict:
+def parse_kv_from_line(line):
     """
     Parse key/value pairs from a single log line:
     - JSON-like:   "key":"value" or "key":value
@@ -424,7 +440,6 @@ draw.text((PADDING, 6), date_str, font=font_small, fill=(180, 180, 180))
 def try_icon(path):
     if path and os.path.exists(path):
         try:
-            from PIL import Image
             return Image.open(path).convert("RGBA").resize(ICON_SIZE)
         except Exception:
             return None
@@ -463,7 +478,7 @@ def draw_progress_block(y, value, goal, icon, bar_color, title="", meta_suffix="
     # title + percent
     if title:
         draw.text((bar_x, title_y), title, font=font_med, fill=(255, 255, 255))
-    pct = _percent(value, goal)
+    pct = percent_str(value, goal)
     w = draw.textlength(pct, font=font_small)
     draw.text((bar_x + BAR_WIDTH - w, title_y), pct, font=font_small, fill=(220, 220, 220))
 
@@ -511,7 +526,7 @@ def draw_stacked_bsc_block(y, segments, goal, title, icon=None):
     # title + % on title line
     if title:
         draw.text((bar_x, title_y), title, font=font_med, fill=(255,255,255))
-    pct = _percent(total_bsc, goal)
+    pct = percent_str(total_bsc, goal)
     w = draw.textlength(pct, font=font_small)
     draw.text((bar_x + bar_w - w, title_y), pct, font=font_small, fill=(220,220,220))
 
