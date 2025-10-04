@@ -30,11 +30,7 @@ jobs:
         # Keep this as ONE folded line for PowerShell (no ^ line breaks)
         run: >
           pyinstaller --onefile --noconsole
-          --name IdleChampsOverlay
-          --add-data "goldtruhe_icon.png;."
-          --add-data "silbertruhe_icon.png;."
-          --add-data "gems_icon.png;."
-          --add-data "blacksmithcontract_icon.png;."
+          --name IdleChampsOverlay        
           progress_tracker_extended.py
 
       - name: Upload artifact

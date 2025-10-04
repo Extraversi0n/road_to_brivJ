@@ -5,25 +5,18 @@ import os
 import re
 import sys
 import json
-import requests
-import certifi
 import locale
 import argparse
+import requests
+import certifi
 from pathlib import Path
 from urllib.parse import urlparse, parse_qsl
-from PIL import Image, ImageDraw, ImageFont as _IF
 from datetime import datetime
+from typing import Optional
+from PIL import Image, ImageDraw, ImageFont as _IF
 
-# =========================
-# PyInstaller helpers (EXE-safe)
-# =========================
-def resource_path(name):
-    """Return path to bundled resource (icons, etc.), works in script and --onefile EXE."""
-    base = getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)
-    return str(Path(base) / name)
-
+# ========= Working dir (EXE/script) =========
 def _set_cwd_to_app_dir():
-    """Ensure default outputs (overlay, config) land next to the script/EXE."""
     try:
         base = Path(sys.executable if getattr(sys, "frozen", False) else __file__).resolve().parent
         os.chdir(base)
@@ -32,26 +25,22 @@ def _set_cwd_to_app_dir():
 
 _set_cwd_to_app_dir()
 
-# =========================
-# Locale (numbers + percentages)
-# =========================
+# ========= Locale formatting =========
 try:
-    locale.setlocale(locale.LC_ALL, "")  # user's OS locale
+    locale.setlocale(locale.LC_ALL, "")
 except Exception:
     pass
 
-def fmt_int(n):
-    """Format an integer with grouping per OS locale."""
+def fmt_int(n: int) -> str:
     try:
         return locale.format_string("%d", int(n), grouping=True)
     except Exception:
         return f"{int(n)}"
 
-# Percent display style: "dot" | "locale" | "int"
+# Percent display style: "locale" | "dot" | "int"
 PERCENT_STYLE = "locale"
 
 def percent_str(value, goal, style=PERCENT_STYLE):
-    """Return a percent string with controlled decimal style (dot/locale/int)."""
     p = 100.0 if goal <= 0 else min(1.0, (value / goal)) * 100.0
     if style == "int":
         return f"{int(round(p))}%"
@@ -65,12 +54,10 @@ def percent_str(value, goal, style=PERCENT_STYLE):
         s = s.replace(",", ".")
     return s + "%"
 
-# =========================
-# CONFIG (Defaults)
-# =========================
+# ========= Defaults =========
 LOG_PATH    = r"C:/IdleChampions/IdleChampions/IdleDragons_Data/StreamingAssets/downloaded_files/webRequestLog.txt"
 OUTPUT_PATH = "overlay_extended.png"
-GOAL_BSC    = 15_360_005  # target in BSC units
+GOAL_BSC    = 15_360_005
 
 FONT_MED_PATH   = "arial.ttf"
 FONT_SMALL_PATH = "arial.ttf"
@@ -82,32 +69,25 @@ ICON_SIZE   = (56, 56)
 BAR_WIDTH   = 520
 BAR_HEIGHT  = 22
 
-# Spacing & styling
 TITLE_BAR_GAP = 10
 LEGEND_GAP    = 6
 BAR_OUTLINE   = (58, 58, 58)
 SEGMENT_SEPARATOR = (25, 25, 25)
-SHOW_SEG_SEPARATORS = False  # set True for thin dividers
+SHOW_SEG_SEPARATORS = False
 
 # Colors
-COLOR_GOLD      = (255, 215,   0)   # Gold
-COLOR_SILVER    = (192, 192, 192)   # Silver
-COLOR_GEMS      = (100, 200, 150)   # Gems = old BSC base green
-COLOR_BSC_BASE  = ( 80, 170, 255)   # NEW BSC base color (distinct blue)
+COLOR_GOLD      = (255, 215,   0)
+COLOR_SILVER    = (192, 192, 192)
+COLOR_GEMS      = (100, 200, 150)
+COLOR_BSC_BASE  = ( 80, 170, 255)
 
-# English month names
 MONTHS_EN = ["", "January", "February", "March", "April", "May", "June",
              "July", "August", "September", "October", "November", "December"]
 
-# =========================
-# ALWAYS-SHOW SETUP DIALOG (with Skip & Extract)
-# =========================
-CONFIG_FILE = "tracker_config.json"
-
+# ========= CLI (headless etc.) =========
 def parse_cli_args():
-    p = argparse.ArgumentParser(description="IdleChamps overlay")
-    p.add_argument("--headless", action="store_true",
-                   help="run without GUI dialog; use saved config and/or CLI overrides")
+    p = argparse.ArgumentParser(description="IdleChamps BSC overlay")
+    p.add_argument("--headless", action="store_true", help="run without GUI dialog")
     p.add_argument("--log-path")
     p.add_argument("--output")
     p.add_argument("--goal-bsc", type=int)
@@ -118,6 +98,9 @@ def parse_cli_args():
     p.add_argument("--percent-style", choices=["locale","dot","int"])
     return p.parse_args()
 
+# ========= Config file =========
+CONFIG_FILE = "tracker_config.json"
+
 def load_config():
     try:
         if os.path.exists(CONFIG_FILE):
@@ -127,42 +110,29 @@ def load_config():
         pass
     return {}
 
-def save_config(cfg):
+def save_config(cfg: dict):
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
 
-# --- Single-line parsing helpers ---
-def find_latest_getuserdetails_line(text):
-    """Return the last log line that contains 'getuserdetails' (case-insensitive)."""
+# ========= Log-line parsing =========
+def find_latest_getuserdetails_line(text: str) -> Optional[str]:
     for line in reversed(text.splitlines()):
         if "getuserdetails" in line.lower():
             return line
     return None
 
-def extract_post_url_from_line(line):
-    """Pull the exact .../post.php URL from the line, if present."""
+def extract_post_url_from_line(line: str) -> Optional[str]:
     m = re.search(r'(https?://[^\s"\'<>]+/post\.php)', line, flags=re.I)
     return m.group(1) if m else None
 
-def parse_kv_from_line(line):
-    """
-    Parse key/value pairs from a single log line:
-    - JSON-like:   "key":"value" or "key":value
-    - URL params:  ...?key=value&key2=value2
-    - Plain pairs: key=value (stops at &, whitespace, quotes, <, >, #)
-    Last occurrence wins.
-    """
+def parse_kv_from_line(line: str) -> dict:
     out = {}
-    # JSON-like "key":"value"
     for k, v in re.findall(r'"([A-Za-z0-9_]+)"\s*:\s*"([^"]+)"', line):
         out[k] = v
-    # JSON-like "key":value (unquoted)
     for k, v in re.findall(r'"([A-Za-z0-9_]+)"\s*:\s*([A-Za-z0-9_.-]+)', line):
         out[k] = v
-    # key=value plain
     for k, v in re.findall(r'([A-Za-z0-9_]+)\s*=\s*([^\s&"\'<>#]+)', line):
         out[k] = v
-    # Any URLs? Parse their query strings too
     for url in re.findall(r'https?://[^\s"\'<>]+', line):
         try:
             q = dict(parse_qsl(urlparse(url).query, keep_blank_values=True))
@@ -171,8 +141,8 @@ def parse_kv_from_line(line):
             pass
     return out
 
-def show_config_dialog(defaults):
-    """Show Tk dialog every run; 'Extract' fills fields from log; 'Skip' uses saved defaults."""
+# ========= GUI (unless headless) =========
+def show_config_dialog(defaults: dict):
     try:
         import tkinter as tk
         from tkinter import filedialog, messagebox
@@ -183,7 +153,6 @@ def show_config_dialog(defaults):
     root.title("IdleChamps Overlay – Settings")
     root.resizable(False, False)
 
-    # Pre-fill with saved/default values or script defaults:
     v_log   = tk.StringVar(value=defaults.get("log_path", LOG_PATH))
     v_goal  = tk.StringVar(value=str(defaults.get("goal_bsc", GOAL_BSC)))
     v_out   = tk.StringVar(value=defaults.get("output_path", OUTPUT_PATH))
@@ -191,9 +160,9 @@ def show_config_dialog(defaults):
     v_hash  = tk.StringVar(value=defaults.get("hash_override", ""))
     v_mcv   = tk.StringVar(value=defaults.get("mcv_override", ""))
     v_api   = tk.StringVar(value=defaults.get("api_url_override", ""))
-    v_rem   = tk.BooleanVar(value=True)   # remember general settings
-    v_save_creds = tk.BooleanVar(value=False)  # save user_id/hash to file?
-    v_show_hash  = tk.BooleanVar(value=False)  # show hash text
+    v_rem   = tk.BooleanVar(value=True)
+    v_save_creds = tk.BooleanVar(value=False)
+    v_show_hash  = tk.BooleanVar(value=False)
 
     def pick_log():
         p = filedialog.askopenfilename(
@@ -204,8 +173,7 @@ def show_config_dialog(defaults):
 
     def pick_out():
         d = filedialog.askdirectory(title="Select output folder")
-        if d:
-            v_out.set(os.path.join(d, "overlay_extended.png"))
+        if d: v_out.set(os.path.join(d, "overlay_extended.png"))
 
     def extract_from_log():
         try:
@@ -213,7 +181,7 @@ def show_config_dialog(defaults):
                 text = f.read()
             line = find_latest_getuserdetails_line(text)
             if not line:
-                messagebox.showerror("Not found", "No 'getuserdetails' entry found in the log.")
+                messagebox.showerror("Not found", "No 'getuserdetails' entry found.")
                 return
             kv = parse_kv_from_line(line)
             api = extract_post_url_from_line(line)
@@ -224,7 +192,6 @@ def show_config_dialog(defaults):
                     if not ps.endswith("/"):
                         ps += "/"
                     api = f"{ps}post.php"
-            # Fill the fields (only if parsed)
             if kv.get("user_id") or kv.get("internal_user_id"):
                 v_uid.set(kv.get("user_id") or kv.get("internal_user_id"))
             if kv.get("hash") or kv.get("hashh"):
@@ -233,9 +200,9 @@ def show_config_dialog(defaults):
                 v_mcv.set(kv.get("mobile_client_version"))
             if api:
                 v_api.set(api)
-            messagebox.showinfo("Extracted", "Values extracted from the latest getuserdetails line.")
+            messagebox.showinfo("Extracted", "Values extracted from latest getuserdetails line.")
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to extract from log:\n{e}")
+            messagebox.showerror("Error", f"Failed to extract:\n{e}")
 
     def validate_goal(text):
         try:
@@ -245,7 +212,7 @@ def show_config_dialog(defaults):
 
     result = {}
 
-    def do_run(save_it):
+    def do_run(save_it: bool):
         g = v_goal.get().strip()
         if not validate_goal(g):
             from tkinter import messagebox
@@ -255,7 +222,6 @@ def show_config_dialog(defaults):
             "log_path": v_log.get().strip(),
             "goal_bsc": int(g.replace("_","")),
             "output_path": v_out.get().strip(),
-            # overrides for this run (may or may not be saved):
             "user_id_override": v_uid.get().strip(),
             "hash_override": v_hash.get().strip(),
             "mcv_override": v_mcv.get().strip(),
@@ -264,7 +230,6 @@ def show_config_dialog(defaults):
         if save_it and v_rem.get():
             to_save = cfg.copy()
             if not v_save_creds.get():
-                # do not persist sensitive values unless asked
                 to_save["user_id_override"] = ""
                 to_save["hash_override"] = ""
             save_config(to_save)
@@ -284,53 +249,42 @@ def show_config_dialog(defaults):
 
     pad = {"padx": 10, "pady": 6}
 
-    # Row 0: log
     tk.Label(root, text="webRequestLog.txt:").grid(row=0, column=0, sticky="w", **pad)
     f0 = tk.Frame(root); f0.grid(row=0, column=1, sticky="we", **pad)
     e0 = tk.Entry(f0, textvariable=v_log, width=48); e0.pack(side="left", fill="x", expand=True)
     tk.Button(f0, text="Browse…", command=pick_log).pack(side="left", padx=6)
 
-    # Row 1: goal
     tk.Label(root, text="BSC Goal:").grid(row=1, column=0, sticky="w", **pad)
     tk.Entry(root, textvariable=v_goal, width=20).grid(row=1, column=1, sticky="w", **pad)
 
-    # Row 2: output
     tk.Label(root, text="Output image:").grid(row=2, column=0, sticky="w", **pad)
     f2 = tk.Frame(root); f2.grid(row=2, column=1, sticky="we", **pad)
     e2 = tk.Entry(f2, textvariable=v_out, width=48); e2.pack(side="left", fill="x", expand=True)
     tk.Button(f2, text="Folder…", command=pick_out).pack(side="left", padx=6)
 
-    # Separator
     tk.Label(root, text="— Overrides (optional) —").grid(row=3, column=0, columnspan=2, sticky="w", padx=10)
 
-    # Row 4: user_id + Extract
     tk.Label(root, text="user_id:").grid(row=4, column=0, sticky="w", **pad)
     tk.Entry(root, textvariable=v_uid, width=28).grid(row=4, column=1, sticky="w", **pad)
 
-    # Row 5: hash (masked) + show
     tk.Label(root, text="hash:").grid(row=5, column=0, sticky="w", **pad)
     e_hash = tk.Entry(root, textvariable=v_hash, width=28, show="•")
     e_hash.grid(row=5, column=1, sticky="w", **pad)
     tk.Checkbutton(root, text="show", variable=v_show_hash, command=toggle_hash_show).grid(row=5, column=1, sticky="e", padx=10)
 
-    # Row 6: mcv
     tk.Label(root, text="mobile_client_version:").grid(row=6, column=0, sticky="w", **pad)
     tk.Entry(root, textvariable=v_mcv, width=28).grid(row=6, column=1, sticky="w", **pad)
 
-    # Row 7: api url
     tk.Label(root, text="post.php URL:").grid(row=7, column=0, sticky="w", **pad)
     tk.Entry(root, textvariable=v_api, width=48).grid(row=7, column=1, sticky="w", **pad)
 
-    # Row 8: extract + remember + save creds
     f8 = tk.Frame(root); f8.grid(row=8, column=0, columnspan=2, sticky="we", padx=10, pady=4)
     tk.Button(f8, text="Extract from log", command=extract_from_log).pack(side="left")
     tk.Checkbutton(f8, text="Remember settings", variable=v_rem).pack(side="left", padx=12)
     tk.Checkbutton(f8, text="Save user_id/hash to config", variable=v_save_creds).pack(side="left", padx=12)
 
-    # Row 9: buttons
     bf = tk.Frame(root); bf.grid(row=9, column=0, columnspan=2, sticky="e", padx=10, pady=10)
-    btn_skip = tk.Button(bf, text="Skip (use saved)", command=do_skip,
-                         state=("normal" if defaults else "disabled"))
+    btn_skip = tk.Button(bf, text="Skip (use saved)", command=do_skip, state=("normal" if defaults else "disabled"))
     btn_skip.pack(side="left", padx=4)
     tk.Button(bf, text="Run", command=lambda: do_run(save_it=False)).pack(side="left", padx=4)
     tk.Button(bf, text="Save & Run", command=lambda: do_run(save_it=True)).pack(side="left", padx=4)
@@ -338,18 +292,16 @@ def show_config_dialog(defaults):
 
     e0.focus_set()
     root.mainloop()
-
     return result.get("cfg", defaults or {})
 
-# --- interactive or headless ---
+# ========= Apply CLI + GUI/headless =========
 _args = parse_cli_args()
 if _args.percent_style:
-    PERCENT_STYLE = _args.percent_style  # optional override for % Darstellung
+    PERCENT_STYLE = _args.percent_style
 
 _saved = load_config()
 
 if _args.headless:
-    # kein GUI: gespeichertes Profil + CLI-Overrides verwenden
     _cfg = dict(_saved) if _saved else {}
     if _args.log_path:  _cfg["log_path"]     = _args.log_path
     if _args.output:    _cfg["output_path"]  = _args.output
@@ -358,15 +310,12 @@ if _args.headless:
     if _args.hash:      _cfg["hash_override"]    = _args.hash
     if _args.mcv:       _cfg["mcv_override"]     = _args.mcv
     if _args.api_url:   _cfg["api_url_override"] = _args.api_url
-    # falls noch gar keine Config existiert: Minimalwerte setzen
     _cfg.setdefault("log_path", LOG_PATH)
     _cfg.setdefault("output_path", OUTPUT_PATH)
     _cfg.setdefault("goal_bsc", GOAL_BSC)
 else:
-    # wie bisher: Dialog immer anzeigen
     _cfg = show_config_dialog(_saved)
 
-# in jedem Modus die finalen Werte anwenden
 LOG_PATH    = _cfg.get("log_path", LOG_PATH)
 OUTPUT_PATH = _cfg.get("output_path", OUTPUT_PATH)
 GOAL_BSC    = int(_cfg.get("goal_bsc", GOAL_BSC))
@@ -375,16 +324,51 @@ HASH_OVERRIDE    = (_cfg.get("hash_override") or "").strip()
 MCV_OVERRIDE     = (_cfg.get("mcv_override") or "").strip()
 API_URL_OVERRIDE = (_cfg.get("api_url_override") or "").strip()
 
+# ========= Icons: ONLY from log folder; crop 256→165 top-left for chests =========
+LOG_DIR = Path(LOG_PATH).resolve().parent  # .../StreamingAssets/downloaded_files
 
-# Optional overrides (empty string means "no override")
-USER_ID_OVERRIDE = (_cfg.get("user_id_override") or "").strip()
-HASH_OVERRIDE    = (_cfg.get("hash_override") or "").strip()
-MCV_OVERRIDE     = (_cfg.get("mcv_override") or "").strip()
-API_URL_OVERRIDE = (_cfg.get("api_url_override") or "").strip()
+ICON_FILES = {
+    "gems":   "Icon_GemPile2_0_4.png",            # 64×64
+    "bsc":    "Icon_BlacksmithContract1_0_6.png", # 64×64
+    "gold":   "Icon_StoreChest_Gold_0_6.png",     # 256×256
+    "silver": "Icon_StoreChest_Silver_0_6.png",   # 256×256
+}
 
-# =========================
-# Helpers
-# =========================
+# Pillow resample compatibility
+try:
+    RESAMPLE = Image.Resampling.LANCZOS  # Pillow >= 10
+except Exception:
+    RESAMPLE = Image.LANCZOS            # Pillow < 10
+
+def crop_top_left(img: Image.Image, crop_w=165, crop_h=165) -> Image.Image:
+    # crop box: (left, upper, right, lower) → top-left area
+    w, h = img.size
+    cw = min(crop_w, w)
+    ch = min(crop_h, h)
+    left  = 0
+    upper = 0
+    right = cw
+    lower = ch
+    return img.crop((left, upper, right, lower))
+
+def load_icon_key(folder: Path, key: str, size=ICON_SIZE) -> Optional[Image.Image]:
+    p = folder / ICON_FILES[key]
+    if not p.exists():
+        return None
+    try:
+        img = Image.open(str(p)).convert("RGBA")
+        if key in ("gold", "silver"):  # crop big chest icons (top-left)
+            img = crop_top_left(img, 165, 165)
+        return img.resize(size, RESAMPLE)
+    except Exception:
+        return None
+
+icon_gems   = load_icon_key(LOG_DIR, "gems")
+icon_bsc    = load_icon_key(LOG_DIR, "bsc")
+icon_gold   = load_icon_key(LOG_DIR, "gold")
+icon_silver = load_icon_key(LOG_DIR, "silver")
+
+# ========= Helpers =========
 def safe_int(v, default=0):
     try:
         return int(v)
@@ -404,7 +388,6 @@ def get_nested(d, path, default=None):
     return cur
 
 def _load_font(path, size):
-    """Load a TTF if available; otherwise fall back to a safe default."""
     try:
         if path and os.path.exists(path):
             return _IF.truetype(path, size)
@@ -417,17 +400,14 @@ def _load_font(path, size):
         pass
     return _IF.load_default()
 
-# =========================
-# READ LOG & CALL API (single-line parse + overrides)
-# =========================
+# ========= Read log & call API =========
 with open(LOG_PATH, "r", encoding="utf-8") as f:
     log_text = f.read()
 
 line = find_latest_getuserdetails_line(log_text)
 if not line and not (USER_ID_OVERRIDE and HASH_OVERRIDE and API_URL_OVERRIDE):
-    raise Exception("Could not find a 'getuserdetails' line in webRequestLog.txt, and no overrides were provided.")
+    raise Exception("Could not find a 'getuserdetails' line and no overrides provided.")
 
-# Determine API URL
 api_url = API_URL_OVERRIDE or (extract_post_url_from_line(line) if line else None)
 if not api_url and line:
     m = re.search(r'"play_server"\s*:\s*"([^"]+)"', line) or re.search(r'play_server\s*=\s*([^\s&"\'<>#]+)', line)
@@ -436,20 +416,15 @@ if not api_url and line:
         if not ps.endswith("/"):
             ps += "/"
         api_url = f"{ps}post.php"
-
 if not api_url:
-    raise Exception("Could not determine post.php URL (neither override nor from log).")
+    raise Exception("Could not determine post.php URL (override or log).")
 
-# Parse kv from that single line
 kv = parse_kv_from_line(line) if line else {}
-
-# Required values (overrides win; then line kv)
 user_id = USER_ID_OVERRIDE or kv.get("user_id") or kv.get("internal_user_id")
 hash_val = HASH_OVERRIDE or kv.get("hash") or kv.get("hashh")
-mcv = MCV_OVERRIDE or kv.get("mobile_client_version") or "633"
-
+mcv      = MCV_OVERRIDE or kv.get("mobile_client_version") or "633"
 if not user_id or not hash_val:
-    raise Exception("user_id or hash are missing (neither override nor in the latest getuserdetails line).")
+    raise Exception("user_id or hash missing (override or log).")
 
 params = {
     "call": "getuserdetails",
@@ -466,28 +441,23 @@ params = {
 }
 headers = {"User-Agent": "Mozilla/5.0"}
 
-# Console-safe print
 try:
     print("🔍 API:", api_url)
 except UnicodeEncodeError:
     print("API:", api_url)
 
-# Use POST (avoid 414; matches post.php semantics)
 resp = requests.post(api_url, data=params, headers=headers, timeout=30, verify=certifi.where())
 if resp.status_code != 200 or not resp.text.strip().startswith("{"):
     snippet = resp.text[:200].replace("\n", " ")
     raise Exception(f"Invalid API response: {resp.status_code} | {snippet}")
 data = resp.json()
 
-# =========================
-# VALUES & CONVERSIONS
-# =========================
+# ========= Values & conversions =========
 chests = data.get("details", {}).get("chests", {})
-gold   = safe_int(chests.get("2", 0))                         # gold chests
-silver = safe_int(chests.get("1", 0))                         # silver chests
-gems   = safe_int(get_nested(data, "details.red_rubies", 0))  # gems
+gold   = safe_int(chests.get("2", 0))
+silver = safe_int(chests.get("1", 0))
+gems   = safe_int(get_nested(data, "details.red_rubies", 0))
 
-# Base BSC from contract buffs
 BSC_WEIGHTS = {31:1, 32:2, 33:6, 34:24, 1797:120}
 
 def find_contract_buffs_anywhere(obj):
@@ -521,12 +491,12 @@ def compute_bsc_from_buffs(json_data):
 
 bsc_base, _b = compute_bsc_from_buffs(data)
 
-# Convert current resources into BSC units (for the stacked bar & legend)
-bsc_from_gold   = gold               # 1 gold = 1 BSC
-bsc_from_silver = silver // 10       # 10 silver = 1 BSC
-bsc_from_gems   = gems // 500        # 500 gems = 1 BSC
+# Convert current resources into BSC
+bsc_from_gold   = gold            # 1 gold chest = 1 BSC
+bsc_from_silver = silver // 10    # 10 silver = 1 BSC
+bsc_from_gems   = gems // 500     # 500 gems = 1 BSC
 
-# Overall remaining BSC after ALL contributions (for the stacked bar)
+# Overall remaining
 R_overall = max(GOAL_BSC - (bsc_base + bsc_from_gold + bsc_from_silver + bsc_from_gems), 0)
 
 # Per-resource goals in units: overall remaining + add back own contribution
@@ -534,37 +504,32 @@ gold_goal_units   = (R_overall + bsc_from_gold)   * 1
 silver_goal_units = (R_overall + bsc_from_silver) * 10
 gems_goal_units   = (R_overall + bsc_from_gems)   * 500
 
-# =========================
-# DRAW
-# =========================
+# ========= Draw =========
 img_h = PADDING*2 + 4*ROW_HEIGHT + 40
 img = Image.new("RGBA", (IMG_WIDTH, img_h), (0,0,0,0))
 draw = ImageDraw.Draw(img)
 
+def _load_font(path, size):
+    try:
+        if path and os.path.exists(path):
+            return _IF.truetype(path, size)
+        for p in (r"C:\Windows\Fonts\arial.ttf",
+                  "/System/Library/Fonts/Supplemental/Arial.ttf",
+                  "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"):
+            if os.path.exists(p):
+                return _IF.truetype(p, size)
+    except Exception:
+        pass
+    return _IF.load_default()
+
 font_med   = _load_font(FONT_MED_PATH, 21)
 font_small = _load_font(FONT_SMALL_PATH, 15)
 
-# Date only (e.g., "29 September 2025")
 now = datetime.now()
 date_str = f"{now.day} {MONTHS_EN[now.month]} {now.year}"
 draw.text((PADDING, 6), date_str, font=font_small, fill=(180, 180, 180))
 
-def try_icon(path):
-    if path and os.path.exists(path):
-        try:
-            return Image.open(path).convert("RGBA").resize(ICON_SIZE)
-        except Exception:
-            return None
-    return None
-
-# Use resource_path so icons load in EXE
-icon_gold   = try_icon(resource_path("goldtruhe_icon.png"))
-icon_silver = try_icon(resource_path("silbertruhe_icon.png"))
-icon_gems   = try_icon(resource_path("gems_icon.png"))
-icon_bsc    = try_icon(resource_path("blacksmithcontract_icon.png"))
-
 def draw_progress_block(y, value, goal, icon, bar_color, title="", meta_suffix=""):
-    """Generic bar with spacing and outline; title shows %; meta shows Remaining/Goal (localized)."""
     bar_x = PADDING + (ICON_SIZE[0] + 10 if icon else 0)
     title_y = y
     title_h = 0
@@ -573,34 +538,28 @@ def draw_progress_block(y, value, goal, icon, bar_color, title="", meta_suffix="
         title_h = bbox[3] - bbox[1]
     bar_y = y + title_h + TITLE_BAR_GAP
 
-    # background + outline
     draw.rectangle([bar_x, bar_y, bar_x + BAR_WIDTH, bar_y + BAR_HEIGHT], fill=(40, 40, 40))
     draw.rectangle([bar_x, bar_y, bar_x + BAR_WIDTH - 1, bar_y + BAR_HEIGHT - 1], outline=BAR_OUTLINE, width=1)
 
-    # fill
     frac = 0 if goal <= 0 else min(value / goal, 1.0)
     fill_w = int(BAR_WIDTH * frac)
     if fill_w > 0:
         draw.rectangle([bar_x, bar_y, bar_x + fill_w, bar_y + BAR_HEIGHT], fill=bar_color)
 
-    # icon
     if icon:
         img.paste(icon, (PADDING, y + (ROW_HEIGHT - ICON_SIZE[1]) // 2), icon)
 
-    # title + percent
     if title:
         draw.text((bar_x, title_y), title, font=font_med, fill=(255, 255, 255))
     pct = percent_str(value, goal)
     w = draw.textlength(pct, font=font_small)
     draw.text((bar_x + BAR_WIDTH - w, title_y), pct, font=font_small, fill=(220, 220, 220))
 
-    # meta line (localized ints)
     remaining_units = max(goal - value, 0)
     meta = f"Remaining: {fmt_int(remaining_units)} • Goal: {fmt_int(goal)}{meta_suffix}"
     draw.text((bar_x, bar_y + BAR_HEIGHT + 4), meta, font=font_small, fill=(210,210,210))
 
 def draw_stacked_bsc_block(y, segments, goal, title, icon=None):
-    """Stacked BSC bar; title shows %; legend lists BSC values (localized)."""
     bar_x = PADDING + (ICON_SIZE[0] + 10 if icon else 0)
     title_y = y
     title_h = 0
@@ -610,11 +569,9 @@ def draw_stacked_bsc_block(y, segments, goal, title, icon=None):
     bar_y = y + title_h + TITLE_BAR_GAP
     bar_w, bar_h = BAR_WIDTH, BAR_HEIGHT
 
-    # background + outline
     draw.rectangle([bar_x, bar_y, bar_x + bar_w, bar_y + bar_h], fill=(40,40,40))
     draw.rectangle([bar_x, bar_y, bar_x + bar_w - 1, bar_y + bar_h - 1], outline=BAR_OUTLINE, width=1)
 
-    # stacked fill
     used_px = 0
     total_bsc = sum(v for _, v, _ in segments)
     for _, val, color in segments:
@@ -631,29 +588,24 @@ def draw_stacked_bsc_block(y, segments, goal, title, icon=None):
         if used_px >= bar_w:
             break
 
-    # icon
     if icon:
         img.paste(icon, (PADDING, y + (ROW_HEIGHT - ICON_SIZE[1]) // 2), icon)
 
-    # title + % on title line
     if title:
         draw.text((bar_x, title_y), title, font=font_med, fill=(255,255,255))
     pct = percent_str(total_bsc, goal)
     w = draw.textlength(pct, font=font_small)
     draw.text((bar_x + bar_w - w, title_y), pct, font=font_small, fill=(220,220,220))
 
-    # simplified legend (localized BSC values)
     labels = [f"{lbl} {fmt_int(val)}" for lbl, val, _ in segments]
     legend = " | ".join(labels)
     draw.text((bar_x, bar_y + bar_h + LEGEND_GAP), legend, font=font_small, fill=(210,210,210))
 
-    # remaining + goal under legend (localized)
     remaining = max(goal - total_bsc, 0)
     meta = f"Remaining: {fmt_int(remaining)} • Goal: {fmt_int(goal)}"
     draw.text((bar_x, bar_y + bar_h + LEGEND_GAP + 18), meta, font=font_small, fill=(200,200,200))
 
-# Build stacked segments (BSC units)
-# (We build icons above; no need to rebuild here)
+# Segments (BSC units)
 segments = [
     ("BSC",   bsc_base,        COLOR_BSC_BASE),
     ("Gold",  bsc_from_gold,   COLOR_GOLD),
@@ -661,7 +613,7 @@ segments = [
     ("Gems",  bsc_from_gems,   COLOR_GEMS),
 ]
 
-# Draw bars
+# Draw
 y0 = 26
 draw_progress_block(y0 + 0*ROW_HEIGHT, gold,   gold_goal_units,   icon_gold,   COLOR_GOLD,
                     title="Gold-Chests",   meta_suffix=" (1 = 1 BSC)")
