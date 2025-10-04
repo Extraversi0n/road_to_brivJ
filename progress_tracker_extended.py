@@ -189,12 +189,27 @@ GOAL_BSC    = int(_cfg.get("goal_bsc", GOAL_BSC))
 # HELPERS
 # =========================
 def extract_value(text, key):
-    lines = text.strip().splitlines()[::-1]
-    for line in lines:
-        m = re.search(rf'{re.escape(key)}=([^&\n]+)', line)
+    """
+    Extracts key=value from messy log lines (URLs, headers, etc.).
+    Stops at &, whitespace, or quotes so it won't grab the whole line.
+    Also supports key="value".
+    Returns the LAST match found in the log (most recent request).
+    """
+    # 1) key="value"
+    pat_quoted = re.compile(rf'{re.escape(key)}\s*=\s*"([^"]+)"')
+
+    # 2) key=value   (stop at &, whitespace, quotes, angle brackets, or #)
+    pat_plain = re.compile(rf'{re.escape(key)}\s*=\s*([^\s&"\'<>#]+)')
+
+    for line in text.strip().splitlines()[::-1]:
+        m = pat_quoted.search(line)
+        if m:
+            return m.group(1)
+        m = pat_plain.search(line)
         if m:
             return m.group(1)
     return None
+
 
 def extract_value_json(text, key):
     lines = text.strip().splitlines()[::-1]
@@ -285,7 +300,11 @@ params = {
 }
 headers = {"User-Agent": "Mozilla/5.0"}
 
-print("🔍 API:", api_url)
+try:
+    print("🔍 API:", api_url)
+except UnicodeEncodeError:
+    print("API:", api_url)
+
 resp = requests.get(api_url, params=params, headers=headers, timeout=30, verify=certifi.where())
 if resp.status_code != 200 or not resp.text.strip().startswith("{"):
     raise Exception(f"Invalid API response: {resp.status_code}")
