@@ -16,7 +16,7 @@ from datetime import datetime
 # =========================
 # PyInstaller helpers (EXE-safe)
 # =========================
-def resource_path(name: str) -> str:
+def resource_path(name):
     """Return path to bundled resource (icons, etc.), works in script and --onefile EXE."""
     base = getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)
     return str(Path(base) / name)
@@ -39,7 +39,7 @@ try:
 except Exception:
     pass
 
-def fmt_int(n: int) -> str:
+def fmt_int(n):
     """Format an integer with grouping per OS locale."""
     try:
         return locale.format_string("%d", int(n), grouping=True)
@@ -51,22 +51,17 @@ PERCENT_STYLE = "locale"
 
 def percent_str(value, goal, style=PERCENT_STYLE):
     """Return a percent string with controlled decimal style (dot/locale/int)."""
-    p = 100.0 if goal <= 0 else min(1.0, value / goal) * 100.0
-
+    p = 100.0 if goal <= 0 else min(1.0, (value / goal)) * 100.0
     if style == "int":
         return f"{int(round(p))}%"
-
-    # one decimal; trim trailing .0
     s = f"{p:.1f}"
     if s.endswith(".0"):
         s = s[:-2]
-
     if style == "locale":
         dec = locale.localeconv().get("decimal_point", ".") or "."
         s = s.replace(".", dec)
     else:
-        s = s.replace(",", ".")  # force dot
-
+        s = s.replace(",", ".")
     return s + "%"
 
 # =========================
@@ -99,12 +94,12 @@ COLOR_SILVER    = (192, 192, 192)   # Silver
 COLOR_GEMS      = (100, 200, 150)   # Gems = old BSC base green
 COLOR_BSC_BASE  = ( 80, 170, 255)   # NEW BSC base color (distinct blue)
 
-# English month names (stable regardless of OS locale)
+# English month names
 MONTHS_EN = ["", "January", "February", "March", "April", "May", "June",
              "July", "August", "September", "October", "November", "December"]
 
 # =========================
-# ALWAYS-SHOW SETUP DIALOG (with Skip)
+# ALWAYS-SHOW SETUP DIALOG (with Skip & Extract)
 # =========================
 CONFIG_FILE = "tracker_config.json"
 
@@ -117,17 +112,56 @@ def load_config():
         pass
     return {}
 
-def save_config(cfg: dict):
+def save_config(cfg):
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
 
-def show_config_dialog(defaults: dict):
-    """Show Tk dialog every run; 'Skip' uses saved defaults if available."""
+# --- Single-line parsing helpers ---
+def find_latest_getuserdetails_line(text):
+    """Return the last log line that contains 'getuserdetails' (case-insensitive)."""
+    for line in reversed(text.splitlines()):
+        if "getuserdetails" in line.lower():
+            return line
+    return None
+
+def extract_post_url_from_line(line):
+    """Pull the exact .../post.php URL from the line, if present."""
+    m = re.search(r'(https?://[^\s"\'<>]+/post\.php)', line, flags=re.I)
+    return m.group(1) if m else None
+
+def parse_kv_from_line(line):
+    """
+    Parse key/value pairs from a single log line:
+    - JSON-like:   "key":"value" or "key":value
+    - URL params:  ...?key=value&key2=value2
+    - Plain pairs: key=value (stops at &, whitespace, quotes, <, >, #)
+    Last occurrence wins.
+    """
+    out = {}
+    # JSON-like "key":"value"
+    for k, v in re.findall(r'"([A-Za-z0-9_]+)"\s*:\s*"([^"]+)"', line):
+        out[k] = v
+    # JSON-like "key":value (unquoted)
+    for k, v in re.findall(r'"([A-Za-z0-9_]+)"\s*:\s*([A-Za-z0-9_.-]+)', line):
+        out[k] = v
+    # key=value plain
+    for k, v in re.findall(r'([A-Za-z0-9_]+)\s*=\s*([^\s&"\'<>#]+)', line):
+        out[k] = v
+    # Any URLs? Parse their query strings too
+    for url in re.findall(r'https?://[^\s"\'<>]+', line):
+        try:
+            q = dict(parse_qsl(urlparse(url).query, keep_blank_values=True))
+            out.update(q)
+        except Exception:
+            pass
+    return out
+
+def show_config_dialog(defaults):
+    """Show Tk dialog every run; 'Extract' fills fields from log; 'Skip' uses saved defaults."""
     try:
         import tkinter as tk
         from tkinter import filedialog, messagebox
     except Exception:
-        # No Tk available? Just use defaults.
         return defaults or {}
 
     root = tk.Tk()
@@ -135,10 +169,16 @@ def show_config_dialog(defaults: dict):
     root.resizable(False, False)
 
     # Pre-fill with saved/default values or script defaults:
-    v_log  = tk.StringVar(value=defaults.get("log_path", LOG_PATH))
-    v_goal = tk.StringVar(value=str(defaults.get("goal_bsc", GOAL_BSC)))
-    v_out  = tk.StringVar(value=defaults.get("output_path", OUTPUT_PATH))
-    v_rem  = tk.BooleanVar(value=True)  # remember on Save & Run
+    v_log   = tk.StringVar(value=defaults.get("log_path", LOG_PATH))
+    v_goal  = tk.StringVar(value=str(defaults.get("goal_bsc", GOAL_BSC)))
+    v_out   = tk.StringVar(value=defaults.get("output_path", OUTPUT_PATH))
+    v_uid   = tk.StringVar(value=defaults.get("user_id_override", ""))
+    v_hash  = tk.StringVar(value=defaults.get("hash_override", ""))
+    v_mcv   = tk.StringVar(value=defaults.get("mcv_override", ""))
+    v_api   = tk.StringVar(value=defaults.get("api_url_override", ""))
+    v_rem   = tk.BooleanVar(value=True)   # remember general settings
+    v_save_creds = tk.BooleanVar(value=False)  # save user_id/hash to file?
+    v_show_hash  = tk.BooleanVar(value=False)  # show hash text
 
     def pick_log():
         p = filedialog.askopenfilename(
@@ -152,6 +192,36 @@ def show_config_dialog(defaults: dict):
         if d:
             v_out.set(os.path.join(d, "overlay_extended.png"))
 
+    def extract_from_log():
+        try:
+            with open(v_log.get().strip(), "r", encoding="utf-8") as f:
+                text = f.read()
+            line = find_latest_getuserdetails_line(text)
+            if not line:
+                messagebox.showerror("Not found", "No 'getuserdetails' entry found in the log.")
+                return
+            kv = parse_kv_from_line(line)
+            api = extract_post_url_from_line(line)
+            if not api:
+                m = re.search(r'"play_server"\s*:\s*"([^"]+)"', line) or re.search(r'play_server\s*=\s*([^\s&"\'<>#]+)', line)
+                if m:
+                    ps = m.group(1).replace(r"\/", "/")
+                    if not ps.endswith("/"):
+                        ps += "/"
+                    api = f"{ps}post.php"
+            # Fill the fields (only if parsed)
+            if kv.get("user_id") or kv.get("internal_user_id"):
+                v_uid.set(kv.get("user_id") or kv.get("internal_user_id"))
+            if kv.get("hash") or kv.get("hashh"):
+                v_hash.set(kv.get("hash") or kv.get("hashh"))
+            if kv.get("mobile_client_version"):
+                v_mcv.set(kv.get("mobile_client_version"))
+            if api:
+                v_api.set(api)
+            messagebox.showinfo("Extracted", "Values extracted from the latest getuserdetails line.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to extract from log:\n{e}")
+
     def validate_goal(text):
         try:
             return int(text.replace("_","").strip()) > 0
@@ -160,56 +230,96 @@ def show_config_dialog(defaults: dict):
 
     result = {}
 
-    def do_run(save_it: bool):
+    def do_run(save_it):
         g = v_goal.get().strip()
         if not validate_goal(g):
+            from tkinter import messagebox
             messagebox.showerror("Invalid goal", "Please enter a positive integer for BSC goal.")
             return
         cfg = {
             "log_path": v_log.get().strip(),
             "goal_bsc": int(g.replace("_","")),
-            "output_path": v_out.get().strip()
+            "output_path": v_out.get().strip(),
+            # overrides for this run (may or may not be saved):
+            "user_id_override": v_uid.get().strip(),
+            "hash_override": v_hash.get().strip(),
+            "mcv_override": v_mcv.get().strip(),
+            "api_url_override": v_api.get().strip(),
         }
         if save_it and v_rem.get():
-            save_config(cfg)
+            to_save = cfg.copy()
+            if not v_save_creds.get():
+                # do not persist sensitive values unless asked
+                to_save["user_id_override"] = ""
+                to_save["hash_override"] = ""
+            save_config(to_save)
         result["cfg"] = cfg
         root.destroy()
 
     def do_skip():
         if not defaults:
+            from tkinter import messagebox
             messagebox.showinfo("No saved settings", "No saved settings found yet.")
             return
         result["cfg"] = defaults
         root.destroy()
 
-    def do_cancel():
-        root.destroy()
-        sys.exit(0)
+    def toggle_hash_show():
+        e_hash.configure(show="" if v_show_hash.get() else "•")
 
     pad = {"padx": 10, "pady": 6}
 
+    # Row 0: log
     tk.Label(root, text="webRequestLog.txt:").grid(row=0, column=0, sticky="w", **pad)
     f0 = tk.Frame(root); f0.grid(row=0, column=1, sticky="we", **pad)
     e0 = tk.Entry(f0, textvariable=v_log, width=48); e0.pack(side="left", fill="x", expand=True)
     tk.Button(f0, text="Browse…", command=pick_log).pack(side="left", padx=6)
 
+    # Row 1: goal
     tk.Label(root, text="BSC Goal:").grid(row=1, column=0, sticky="w", **pad)
     tk.Entry(root, textvariable=v_goal, width=20).grid(row=1, column=1, sticky="w", **pad)
 
+    # Row 2: output
     tk.Label(root, text="Output image:").grid(row=2, column=0, sticky="w", **pad)
     f2 = tk.Frame(root); f2.grid(row=2, column=1, sticky="we", **pad)
     e2 = tk.Entry(f2, textvariable=v_out, width=48); e2.pack(side="left", fill="x", expand=True)
     tk.Button(f2, text="Folder…", command=pick_out).pack(side="left", padx=6)
 
-    tk.Checkbutton(root, text="Remember these settings", variable=v_rem).grid(row=3, column=1, sticky="w", **pad)
+    # Separator
+    tk.Label(root, text="— Overrides (optional) —").grid(row=3, column=0, columnspan=2, sticky="w", padx=10)
 
-    bf = tk.Frame(root); bf.grid(row=4, column=0, columnspan=2, sticky="e", padx=10, pady=10)
+    # Row 4: user_id + Extract
+    tk.Label(root, text="user_id:").grid(row=4, column=0, sticky="w", **pad)
+    tk.Entry(root, textvariable=v_uid, width=28).grid(row=4, column=1, sticky="w", **pad)
+
+    # Row 5: hash (masked) + show
+    tk.Label(root, text="hash:").grid(row=5, column=0, sticky="w", **pad)
+    e_hash = tk.Entry(root, textvariable=v_hash, width=28, show="•")
+    e_hash.grid(row=5, column=1, sticky="w", **pad)
+    tk.Checkbutton(root, text="show", variable=v_show_hash, command=toggle_hash_show).grid(row=5, column=1, sticky="e", padx=10)
+
+    # Row 6: mcv
+    tk.Label(root, text="mobile_client_version:").grid(row=6, column=0, sticky="w", **pad)
+    tk.Entry(root, textvariable=v_mcv, width=28).grid(row=6, column=1, sticky="w", **pad)
+
+    # Row 7: api url
+    tk.Label(root, text="post.php URL:").grid(row=7, column=0, sticky="w", **pad)
+    tk.Entry(root, textvariable=v_api, width=48).grid(row=7, column=1, sticky="w", **pad)
+
+    # Row 8: extract + remember + save creds
+    f8 = tk.Frame(root); f8.grid(row=8, column=0, columnspan=2, sticky="we", padx=10, pady=4)
+    tk.Button(f8, text="Extract from log", command=extract_from_log).pack(side="left")
+    tk.Checkbutton(f8, text="Remember settings", variable=v_rem).pack(side="left", padx=12)
+    tk.Checkbutton(f8, text="Save user_id/hash to config", variable=v_save_creds).pack(side="left", padx=12)
+
+    # Row 9: buttons
+    bf = tk.Frame(root); bf.grid(row=9, column=0, columnspan=2, sticky="e", padx=10, pady=10)
     btn_skip = tk.Button(bf, text="Skip (use saved)", command=do_skip,
                          state=("normal" if defaults else "disabled"))
     btn_skip.pack(side="left", padx=4)
     tk.Button(bf, text="Run", command=lambda: do_run(save_it=False)).pack(side="left", padx=4)
     tk.Button(bf, text="Save & Run", command=lambda: do_run(save_it=True)).pack(side="left", padx=4)
-    tk.Button(bf, text="Cancel", command=do_cancel).pack(side="left", padx=4)
+    tk.Button(bf, text="Cancel", command=root.destroy).pack(side="left", padx=4)
 
     e0.focus_set()
     root.mainloop()
@@ -225,8 +335,14 @@ LOG_PATH    = _cfg.get("log_path", LOG_PATH)
 OUTPUT_PATH = _cfg.get("output_path", OUTPUT_PATH)
 GOAL_BSC    = int(_cfg.get("goal_bsc", GOAL_BSC))
 
+# Optional overrides (empty string means "no override")
+USER_ID_OVERRIDE = (_cfg.get("user_id_override") or "").strip()
+HASH_OVERRIDE    = (_cfg.get("hash_override") or "").strip()
+MCV_OVERRIDE     = (_cfg.get("mcv_override") or "").strip()
+API_URL_OVERRIDE = (_cfg.get("api_url_override") or "").strip()
+
 # =========================
-# Small helpers
+# Helpers
 # =========================
 def safe_int(v, default=0):
     try:
@@ -251,7 +367,6 @@ def _load_font(path, size):
     try:
         if path and os.path.exists(path):
             return _IF.truetype(path, size)
-        # system fallbacks
         for p in (r"C:\Windows\Fonts\arial.ttf",
                   "/System/Library/Fonts/Supplemental/Arial.ttf",
                   "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"):
@@ -261,83 +376,39 @@ def _load_font(path, size):
         pass
     return _IF.load_default()
 
-# --- Single-line parsing helpers ---
-def find_latest_getuserdetails_line(text):
-    """Return the last log line that contains 'getuserdetails' (case-insensitive)."""
-    for line in reversed(text.splitlines()):
-        if "getuserdetails" in line.lower():
-            return line
-    return None
-
-def extract_post_url_from_line(line):
-    """Pull the exact .../post.php URL from the line, if present."""
-    m = re.search(r'(https?://[^\s"\'<>]+/post\.php)', line, flags=re.I)
-    return m.group(1) if m else None
-
-def parse_kv_from_line(line):
-    """
-    Parse key/value pairs from a single log line:
-    - JSON-like:   "key":"value" or "key":value
-    - URL params:  ...?key=value&key2=value2
-    - Plain pairs: key=value (stops at &, whitespace, quotes, <, >, #)
-    Last occurrence wins.
-    """
-    out = {}
-
-    # JSON-like "key":"value"
-    for k, v in re.findall(r'"([A-Za-z0-9_]+)"\s*:\s*"([^"]+)"', line):
-        out[k] = v
-
-    # JSON-like "key":value (unquoted)
-    for k, v in re.findall(r'"([A-Za-z0-9_]+)"\s*:\s*([A-Za-z0-9_.-]+)', line):
-        out[k] = v
-
-    # key=value plain
-    for k, v in re.findall(r'([A-Za-z0-9_]+)\s*=\s*([^\s&"\'<>#]+)', line):
-        out[k] = v
-
-    # Any URLs? Parse their query strings too
-    for url in re.findall(r'https?://[^\s"\'<>]+', line):
-        try:
-            q = dict(parse_qsl(urlparse(url).query, keep_blank_values=True))
-            out.update(q)
-        except Exception:
-            pass
-
-    return out
-
 # =========================
-# READ LOG & CALL API (single-line parse)
+# READ LOG & CALL API (single-line parse + overrides)
 # =========================
 with open(LOG_PATH, "r", encoding="utf-8") as f:
     log_text = f.read()
 
 line = find_latest_getuserdetails_line(log_text)
-if not line:
-    raise Exception("Could not find a 'getuserdetails' line in webRequestLog.txt.")
+if not line and not (USER_ID_OVERRIDE and HASH_OVERRIDE and API_URL_OVERRIDE):
+    raise Exception("Could not find a 'getuserdetails' line in webRequestLog.txt, and no overrides were provided.")
 
-# exact post.php URL (if present)
-api_url = extract_post_url_from_line(line)
-if not api_url:
-    # Fallback: reconstruct from play_server on this line
+# Determine API URL
+api_url = API_URL_OVERRIDE or (extract_post_url_from_line(line) if line else None)
+if not api_url and line:
     m = re.search(r'"play_server"\s*:\s*"([^"]+)"', line) or re.search(r'play_server\s*=\s*([^\s&"\'<>#]+)', line)
-    if not m:
-        raise Exception("Could not determine post.php URL or play_server from the line.")
-    play_server = m.group(1).replace(r"\/", "/")
-    if not play_server.endswith("/"):
-        play_server += "/"
-    api_url = f"{play_server}post.php"
+    if m:
+        ps = m.group(1).replace(r"\/", "/")
+        if not ps.endswith("/"):
+            ps += "/"
+        api_url = f"{ps}post.php"
+
+if not api_url:
+    raise Exception("Could not determine post.php URL (neither override nor from log).")
 
 # Parse kv from that single line
-kv = parse_kv_from_line(line)
+kv = parse_kv_from_line(line) if line else {}
 
-# Required values (last occurrence wins)
-user_id = kv.get("user_id") or kv.get("internal_user_id")
-hash_val = kv.get("hash") or kv.get("hashh")  # accept "hashh" if present
-mcv      = kv.get("mobile_client_version") or "633"
+# Required values (overrides win; then line kv)
+user_id = USER_ID_OVERRIDE or kv.get("user_id") or kv.get("internal_user_id")
+hash_val = HASH_OVERRIDE or kv.get("hash") or kv.get("hashh")
+mcv = MCV_OVERRIDE or kv.get("mobile_client_version") or "633"
 
 if not user_id or not hash_val:
-    raise Exception("user_id or hash not found on the latest getuserdetails line.")
+    raise Exception("user_id or hash are missing (neither override nor in the latest getuserdetails line).")
 
 params = {
     "call": "getuserdetails",
@@ -354,7 +425,7 @@ params = {
 }
 headers = {"User-Agent": "Mozilla/5.0"}
 
-# Console-safe print (no emoji crash on cp1252)
+# Console-safe print
 try:
     print("🔍 API:", api_url)
 except UnicodeEncodeError:
@@ -541,6 +612,7 @@ def draw_stacked_bsc_block(y, segments, goal, title, icon=None):
     draw.text((bar_x, bar_y + bar_h + LEGEND_GAP + 18), meta, font=font_small, fill=(200,200,200))
 
 # Build stacked segments (BSC units)
+# (We build icons above; no need to rebuild here)
 segments = [
     ("BSC",   bsc_base,        COLOR_BSC_BASE),
     ("Gold",  bsc_from_gold,   COLOR_GOLD),
