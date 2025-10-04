@@ -9,6 +9,8 @@ import locale
 import argparse
 import requests
 import certifi
+import gzip
+import struct
 from pathlib import Path
 from urllib.parse import urlparse, parse_qsl
 from datetime import datetime
@@ -50,7 +52,7 @@ def percent_str(value, goal, style=PERCENT_STYLE):
     if style == "locale":
         dec = locale.localeconv().get("decimal_point", ".") or "."
         s = s.replace(".", dec)
-    else:
+    else:  # dot
         s = s.replace(",", ".")
     return s + "%"
 
@@ -127,12 +129,16 @@ def extract_post_url_from_line(line: str) -> Optional[str]:
 
 def parse_kv_from_line(line: str) -> dict:
     out = {}
+    # JSON-ish "k":"v"
     for k, v in re.findall(r'"([A-Za-z0-9_]+)"\s*:\s*"([^"]+)"', line):
         out[k] = v
+    # JSON-ish "k":123
     for k, v in re.findall(r'"([A-Za-z0-9_]+)"\s*:\s*([A-Za-z0-9_.-]+)', line):
         out[k] = v
+    # key=value pairs
     for k, v in re.findall(r'([A-Za-z0-9_]+)\s*=\s*([^\s&"\'<>#]+)', line):
         out[k] = v
+    # query params inside URLs
     for url in re.findall(r'https?://[^\s"\'<>]+', line):
         try:
             q = dict(parse_qsl(urlparse(url).query, keep_blank_values=True))
@@ -324,83 +330,7 @@ HASH_OVERRIDE    = (_cfg.get("hash_override") or "").strip()
 MCV_OVERRIDE     = (_cfg.get("mcv_override") or "").strip()
 API_URL_OVERRIDE = (_cfg.get("api_url_override") or "").strip()
 
-# ========= Icons: ONLY from log folder; crop 256→165 top-left for chests =========
-LOG_DIR = Path(LOG_PATH).resolve().parent  # .../StreamingAssets/downloaded_files
-
-ICON_FILES = {
-    "gems":   "Icon_GemPile2_0_4.png",            # 64×64
-    "bsc":    "Icon_BlacksmithContract1_0_6.png", # 64×64
-    "gold":   "Icon_StoreChest_Gold_0_6.png",     # 256×256
-    "silver": "Icon_StoreChest_Silver_0_6.png",   # 256×256
-}
-
-# Pillow resample compatibility
-try:
-    RESAMPLE = Image.Resampling.LANCZOS  # Pillow >= 10
-except Exception:
-    RESAMPLE = Image.LANCZOS            # Pillow < 10
-
-def crop_top_left(img: Image.Image, crop_w=165, crop_h=165) -> Image.Image:
-    # crop box: (left, upper, right, lower) → top-left area
-    w, h = img.size
-    cw = min(crop_w, w)
-    ch = min(crop_h, h)
-    left  = 0
-    upper = 0
-    right = cw
-    lower = ch
-    return img.crop((left, upper, right, lower))
-
-def load_icon_key(folder: Path, key: str, size=ICON_SIZE) -> Optional[Image.Image]:
-    p = folder / ICON_FILES[key]
-    if not p.exists():
-        return None
-    try:
-        img = Image.open(str(p)).convert("RGBA")
-        if key in ("gold", "silver"):  # crop big chest icons (top-left)
-            img = crop_top_left(img, 165, 165)
-        return img.resize(size, RESAMPLE)
-    except Exception:
-        return None
-
-icon_gems   = load_icon_key(LOG_DIR, "gems")
-icon_bsc    = load_icon_key(LOG_DIR, "bsc")
-icon_gold   = load_icon_key(LOG_DIR, "gold")
-icon_silver = load_icon_key(LOG_DIR, "silver")
-
-# ========= Helpers =========
-def safe_int(v, default=0):
-    try:
-        return int(v)
-    except Exception:
-        try:
-            return int(float(v))
-        except Exception:
-            return default
-
-def get_nested(d, path, default=None):
-    cur = d
-    for part in path.split("."):
-        if isinstance(cur, dict) and part in cur:
-            cur = cur[part]
-        else:
-            return default
-    return cur
-
-def _load_font(path, size):
-    try:
-        if path and os.path.exists(path):
-            return _IF.truetype(path, size)
-        for p in (r"C:\Windows\Fonts\arial.ttf",
-                  "/System/Library/Fonts/Supplemental/Arial.ttf",
-                  "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"):
-            if os.path.exists(p):
-                return _IF.truetype(p, size)
-    except Exception:
-        pass
-    return _IF.load_default()
-
-# ========= Read log & call API =========
+# ========= Read log & build API call =========
 with open(LOG_PATH, "r", encoding="utf-8") as f:
     log_text = f.read()
 
@@ -453,6 +383,24 @@ if resp.status_code != 200 or not resp.text.strip().startswith("{"):
 data = resp.json()
 
 # ========= Values & conversions =========
+def safe_int(v, default=0):
+    try:
+        return int(v)
+    except Exception:
+        try:
+            return int(float(v))
+        except Exception:
+            return default
+
+def get_nested(d, path, default=None):
+    cur = d
+    for part in path.split("."):
+        if isinstance(cur, dict) and part in cur:
+            cur = cur[part]
+        else:
+            return default
+    return cur
+
 chests = data.get("details", {}).get("chests", {})
 gold   = safe_int(chests.get("2", 0))
 silver = safe_int(chests.get("1", 0))
@@ -476,8 +424,8 @@ def find_contract_buffs_anywhere(obj):
 def compute_bsc_from_buffs(json_data):
     buff_list = find_contract_buffs_anywhere(json_data)
     total = 0
-    if not buff_list: return 0, {}
     breakdown = {k: 0 for k in BSC_WEIGHTS.keys()}
+    if not buff_list: return 0, breakdown
     for entry in buff_list:
         try:
             b_id = int(entry.get("buff_id", -1))
@@ -504,11 +452,167 @@ gold_goal_units   = (R_overall + bsc_from_gold)   * 1
 silver_goal_units = (R_overall + bsc_from_silver) * 10
 gems_goal_units   = (R_overall + bsc_from_gems)   * 500
 
-# ========= Draw =========
-img_h = PADDING*2 + 4*ROW_HEIGHT + 40
-img = Image.new("RGBA", (IMG_WIDTH, img_h), (0,0,0,0))
-draw = ImageDraw.Draw(img)
+# ========= Icon handling (download from EXACT endpoints, unwrap PNGs, crop, resize) =========
+LOG_DIR = Path(LOG_PATH).resolve().parent  # .../StreamingAssets/downloaded_files
 
+# Canonical local filenames we keep using in the overlay:
+ICON_FILES = {
+    "gems":   "Icon_GemPile2_0_4.png",
+    "bsc":    "Icon_BlacksmithContract1_Inv_0_5.png",
+    "gold":   "Icon_StoreChest_Gold_0_6.png",
+    "silver": "Icon_StoreChest_Silver_0_6.png",
+}
+
+# Exact remote paths
+REMOTE_PATHS = {
+    "silver": "Icons/Chests/Icon_StoreChest_Silver",
+    "gold":   "Icons/Chests/Icon_StoreChest_Gold",
+    "gems":   "Icons/Inventory/Icon_GemPile2",
+    "bsc":    "Icons/Inventory/Icon_BlacksmithContract1",
+}
+
+# Pillow resample compatibility
+try:
+    RESAMPLE = Image.Resampling.LANCZOS
+except Exception:
+    RESAMPLE = Image.LANCZOS
+
+PNG_SIG  = b"\x89PNG\r\n\x1a\n"
+PNG_IEND = b"IEND\xaeB`\x82"
+
+def assets_base_from_api_url(api_url: str) -> str:
+    u = urlparse(api_url)
+    return f"{u.scheme}://{u.netloc}/~idledragons/mobile_assets/"
+
+def maybe_decompress(data: bytes, headers: dict) -> bytes:
+    enc = (headers or {}).get("Content-Encoding", "").lower()
+    if enc == "gzip" or (len(data) >= 2 and data[:2] == b"\x1f\x8b"):
+        try:
+            return gzip.decompress(data)
+        except Exception:
+            pass
+    return data
+
+def iter_embedded_pngs(blob: bytes):
+    """Yield (start, end, width, height) for each PNG found by signature to IEND."""
+    i = 0
+    n = len(blob)
+    while True:
+        start = blob.find(PNG_SIG, i)
+        if start == -1:
+            return
+        end = blob.find(PNG_IEND, start)
+        if end == -1:
+            return
+        end += len(PNG_IEND)
+        # Extract IHDR width/height if possible
+        width = height = None
+        try:
+            ihdr_off = start + 8
+            ihdr_len = struct.unpack(">I", blob[ihdr_off:ihdr_off+4])[0]
+            ihdr_tag = blob[ihdr_off+4:ihdr_off+8]
+            if ihdr_tag == b'IHDR' and ihdr_len >= 8:
+                width  = struct.unpack(">I", blob[ihdr_off+8: ihdr_off+12])[0]
+                height = struct.unpack(">I", blob[ihdr_off+12: ihdr_off+16])[0]
+        except Exception:
+            pass
+        yield (start, end, width, height)
+        i = end
+
+def choose_png_for_key(candidates, key: str):
+    """Pick the best embedded PNG by side length for each icon type."""
+    if not candidates:
+        return None
+    scored = []
+    for (s, e, w, h) in candidates:
+        side = max(w or 0, h or 0)
+        scored.append((side, w, h, s, e))
+    if key in ("gold", "silver"):
+        scored.sort(key=lambda t: (0 if t[0] >= 200 else 1, -t[0]))  # prefer >=200 (256 art), then largest
+        return scored[0]
+    if key == "bsc":
+        scored.sort(key=lambda t: min(abs((t[0] or 0)-128), abs((t[0] or 0)-64)))  # prefer 128 then 64
+        return scored[0]
+    if key == "gems":
+        scored.sort(key=lambda t: abs((t[0] or 0) - 64))  # prefer 64
+        return scored[0]
+    scored.sort(key=lambda t: -t[0])
+    return scored[0]
+
+def download_and_extract_icon(key: str, api_url: str) -> bytes | None:
+    """Download from exact path (wrapper), try also with '.png'. Extract best embedded PNG."""
+    base = assets_base_from_api_url(api_url)
+    for suffix in ("", ".png"):
+        url = base + REMOTE_PATHS[key] + suffix
+        try:
+            r = requests.get(url, timeout=25, verify=certifi.where())
+            if r.status_code != 200 or not r.content:
+                continue
+            content = maybe_decompress(r.content, r.headers or {})
+            if content.startswith(PNG_SIG):
+                # Already a raw PNG; return as-is
+                return content
+            cands = list(iter_embedded_pngs(content))
+            if not cands:
+                continue
+            best = choose_png_for_key(cands, key)
+            if not best:
+                continue
+            _, w, h, s, e = best
+            return content[s:e]
+        except Exception:
+            continue
+    return None
+
+def ensure_icons_present(api_url: str):
+    for key, local_name in ICON_FILES.items():
+        p = LOG_DIR / local_name
+        if p.exists():
+            continue
+        data = download_and_extract_icon(key, api_url)
+        if data:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with open(p, "wb") as f:
+                f.write(data)
+        # If download fails, we proceed without icon (non-fatal)
+
+def crop_top_left(img: Image.Image, crop_w=165, crop_h=165) -> Image.Image:
+    w, h = img.size
+    cw = min(crop_w, w)
+    ch = min(crop_h, h)
+    return img.crop((0, 0, cw, ch))
+
+def crop_box(img: Image.Image, left: int, top: int, width: int, height: int) -> Image.Image:
+    right = min(left + width, img.size[0])
+    lower = min(top + height, img.size[1])
+    left = max(0, left); top = max(0, top)
+    return img.crop((left, top, right, lower))
+
+def load_icon_processed(path: Path, key: str, size=ICON_SIZE):
+    if not path.exists():
+        return None
+    try:
+        img = Image.open(str(path)).convert("RGBA")
+        w, h = img.size
+        if key in ("gold", "silver"):
+            if max(w, h) >= 200:  # 256 art
+                img = crop_top_left(img, 165, 165)
+        elif key == "bsc":
+            if (w, h) == (128, 128):
+                img = crop_box(img, 4, 4, 64, 64)
+        return img.resize(size, Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS)
+    except Exception:
+        return None
+
+# Download if missing, then load
+LOG_DIR = Path(LOG_PATH).resolve().parent
+ensure_icons_present(api_url)
+icon_gems   = load_icon_processed(LOG_DIR / ICON_FILES["gems"],   "gems")
+icon_bsc    = load_icon_processed(LOG_DIR / ICON_FILES["bsc"],    "bsc")
+icon_gold   = load_icon_processed(LOG_DIR / ICON_FILES["gold"],   "gold")
+icon_silver = load_icon_processed(LOG_DIR / ICON_FILES["silver"], "silver")
+
+# ========= Draw =========
 def _load_font(path, size):
     try:
         if path and os.path.exists(path):
@@ -521,6 +625,10 @@ def _load_font(path, size):
     except Exception:
         pass
     return _IF.load_default()
+
+img_h = PADDING*2 + 4*ROW_HEIGHT + 40
+img = Image.new("RGBA", (IMG_WIDTH, img_h), (0,0,0,0))
+draw = ImageDraw.Draw(img)
 
 font_med   = _load_font(FONT_MED_PATH, 21)
 font_small = _load_font(FONT_SMALL_PATH, 15)
