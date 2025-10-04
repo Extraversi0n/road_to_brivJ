@@ -8,6 +8,7 @@ import json
 import requests
 import certifi
 import locale
+import argparse
 from pathlib import Path
 from urllib.parse import urlparse, parse_qsl
 from PIL import Image, ImageDraw, ImageFont as _IF
@@ -102,6 +103,20 @@ MONTHS_EN = ["", "January", "February", "March", "April", "May", "June",
 # ALWAYS-SHOW SETUP DIALOG (with Skip & Extract)
 # =========================
 CONFIG_FILE = "tracker_config.json"
+
+def parse_cli_args():
+    p = argparse.ArgumentParser(description="IdleChamps overlay")
+    p.add_argument("--headless", action="store_true",
+                   help="run without GUI dialog; use saved config and/or CLI overrides")
+    p.add_argument("--log-path")
+    p.add_argument("--output")
+    p.add_argument("--goal-bsc", type=int)
+    p.add_argument("--user-id")
+    p.add_argument("--hash")
+    p.add_argument("--mcv")
+    p.add_argument("--api-url")
+    p.add_argument("--percent-style", choices=["locale","dot","int"])
+    return p.parse_args()
 
 def load_config():
     try:
@@ -326,14 +341,40 @@ def show_config_dialog(defaults):
 
     return result.get("cfg", defaults or {})
 
-# apply dialog (always shown)
-_saved = load_config()
-_cfg = show_config_dialog(_saved)
+# --- interactive or headless ---
+_args = parse_cli_args()
+if _args.percent_style:
+    PERCENT_STYLE = _args.percent_style  # optional override for % Darstellung
 
-# override script defaults with chosen values
+_saved = load_config()
+
+if _args.headless:
+    # kein GUI: gespeichertes Profil + CLI-Overrides verwenden
+    _cfg = dict(_saved) if _saved else {}
+    if _args.log_path:  _cfg["log_path"]     = _args.log_path
+    if _args.output:    _cfg["output_path"]  = _args.output
+    if _args.goal_bsc:  _cfg["goal_bsc"]     = _args.goal_bsc
+    if _args.user_id:   _cfg["user_id_override"] = _args.user_id
+    if _args.hash:      _cfg["hash_override"]    = _args.hash
+    if _args.mcv:       _cfg["mcv_override"]     = _args.mcv
+    if _args.api_url:   _cfg["api_url_override"] = _args.api_url
+    # falls noch gar keine Config existiert: Minimalwerte setzen
+    _cfg.setdefault("log_path", LOG_PATH)
+    _cfg.setdefault("output_path", OUTPUT_PATH)
+    _cfg.setdefault("goal_bsc", GOAL_BSC)
+else:
+    # wie bisher: Dialog immer anzeigen
+    _cfg = show_config_dialog(_saved)
+
+# in jedem Modus die finalen Werte anwenden
 LOG_PATH    = _cfg.get("log_path", LOG_PATH)
 OUTPUT_PATH = _cfg.get("output_path", OUTPUT_PATH)
 GOAL_BSC    = int(_cfg.get("goal_bsc", GOAL_BSC))
+USER_ID_OVERRIDE = (_cfg.get("user_id_override") or "").strip()
+HASH_OVERRIDE    = (_cfg.get("hash_override") or "").strip()
+MCV_OVERRIDE     = (_cfg.get("mcv_override") or "").strip()
+API_URL_OVERRIDE = (_cfg.get("api_url_override") or "").strip()
+
 
 # Optional overrides (empty string means "no override")
 USER_ID_OVERRIDE = (_cfg.get("user_id_override") or "").strip()
