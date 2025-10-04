@@ -1,4 +1,6 @@
 # Road to BrivJ – Overlay
+![Windows EXE](https://github.com/Extraversi0n/road_to_brivJ/actions/workflows/windows-build.yml/badge.svg)
+
 ![Overlay example](docs/overlay_example.png)
 
 
