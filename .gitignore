@@ -1,6 +1,7 @@
 # Python
 __pycache__/
 *.py[cod]
+*.pyc
 *.pyo
 *.pyd
 *.pdb
@@ -22,3 +23,6 @@ dist/
 # OS junk
 .DS_Store
 Thumbs.db
+
+# Overlay runtime cache
+overlay_icon_cache/

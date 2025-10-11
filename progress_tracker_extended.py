@@ -5,12 +5,12 @@ import os
 import re
 import sys
 import json
+import gzip
+import struct
 import locale
 import argparse
 import requests
 import certifi
-import gzip
-import struct
 from pathlib import Path
 from urllib.parse import urlparse, parse_qsl
 from datetime import datetime
@@ -24,8 +24,12 @@ def _set_cwd_to_app_dir():
         os.chdir(base)
     except Exception:
         pass
-
 _set_cwd_to_app_dir()
+
+# App dir + local cache dir (next to script/exe)
+from pathlib import Path as _PathAlias
+APP_DIR = _PathAlias.cwd()
+ICON_CACHE_DIR = APP_DIR / "overlay_icon_cache"
 
 # ========= Locale formatting =========
 try:
@@ -46,13 +50,11 @@ def percent_str(value, goal, style=PERCENT_STYLE):
     p = 100.0 if goal <= 0 else min(1.0, (value / goal)) * 100.0
     if style == "int":
         return f"{int(round(p))}%"
-    s = f"{p:.1f}"
-    if s.endswith(".0"):
-        s = s[:-2]
+    s = f"{p:.2f}"  # two decimals
     if style == "locale":
         dec = locale.localeconv().get("decimal_point", ".") or "."
         s = s.replace(".", dec)
-    else:  # dot
+    else:  # "dot"
         s = s.replace(",", ".")
     return s + "%"
 
@@ -452,10 +454,8 @@ gold_goal_units   = (R_overall + bsc_from_gold)   * 1
 silver_goal_units = (R_overall + bsc_from_silver) * 10
 gems_goal_units   = (R_overall + bsc_from_gems)   * 500
 
-# ========= Icon handling (download from EXACT endpoints, unwrap PNGs, crop, resize) =========
-LOG_DIR = Path(LOG_PATH).resolve().parent  # .../StreamingAssets/downloaded_files
-
-# Canonical local filenames we keep using in the overlay:
+# ========= SAFE ICONS (cache raw PNGs in app dir; crop/resize only in memory) =========
+# Canonical filenames we’ll use *inside the cache*
 ICON_FILES = {
     "gems":   "Icon_GemPile2_0_4.png",
     "bsc":    "Icon_BlacksmithContract1_Inv_0_5.png",
@@ -463,7 +463,7 @@ ICON_FILES = {
     "silver": "Icon_StoreChest_Silver_0_6.png",
 }
 
-# Exact remote paths
+# Exact remote paths to request
 REMOTE_PATHS = {
     "silver": "Icons/Chests/Icon_StoreChest_Silver",
     "gold":   "Icons/Chests/Icon_StoreChest_Gold",
@@ -494,7 +494,7 @@ def maybe_decompress(data: bytes, headers: dict) -> bytes:
     return data
 
 def iter_embedded_pngs(blob: bytes):
-    """Yield (start, end, width, height) for each PNG found by signature to IEND."""
+    """Yield (start, end, width, height) for each embedded PNG found."""
     i = 0
     n = len(blob)
     while True:
@@ -505,7 +505,6 @@ def iter_embedded_pngs(blob: bytes):
         if end == -1:
             return
         end += len(PNG_IEND)
-        # Extract IHDR width/height if possible
         width = height = None
         try:
             ihdr_off = start + 8
@@ -520,7 +519,7 @@ def iter_embedded_pngs(blob: bytes):
         i = end
 
 def choose_png_for_key(candidates, key: str):
-    """Pick the best embedded PNG by side length for each icon type."""
+    """Pick best embedded PNG by size for each icon type (raw bytes saved; no disk edits)."""
     if not candidates:
         return None
     scored = []
@@ -528,7 +527,7 @@ def choose_png_for_key(candidates, key: str):
         side = max(w or 0, h or 0)
         scored.append((side, w, h, s, e))
     if key in ("gold", "silver"):
-        scored.sort(key=lambda t: (0 if t[0] >= 200 else 1, -t[0]))  # prefer >=200 (256 art), then largest
+        scored.sort(key=lambda t: (0 if t[0] >= 200 else 1, -t[0]))  # prefer 256-ish chest art
         return scored[0]
     if key == "bsc":
         scored.sort(key=lambda t: min(abs((t[0] or 0)-128), abs((t[0] or 0)-64)))  # prefer 128 then 64
@@ -539,18 +538,18 @@ def choose_png_for_key(candidates, key: str):
     scored.sort(key=lambda t: -t[0])
     return scored[0]
 
-def download_and_extract_icon(key: str, api_url: str) -> bytes | None:
-    """Download from exact path (wrapper), try also with '.png'. Extract best embedded PNG."""
+def download_and_extract_icon_raw_png(key: str, api_url: str) -> bytes | None:
+    """Download from exact path; return the RAW PNG bytes (no crop/resize when saving)."""
     base = assets_base_from_api_url(api_url)
+    path = REMOTE_PATHS[key]
     for suffix in ("", ".png"):
-        url = base + REMOTE_PATHS[key] + suffix
+        url = base + path + suffix
         try:
             r = requests.get(url, timeout=25, verify=certifi.where())
             if r.status_code != 200 or not r.content:
                 continue
             content = maybe_decompress(r.content, r.headers or {})
             if content.startswith(PNG_SIG):
-                # Already a raw PNG; return as-is
                 return content
             cands = list(iter_embedded_pngs(content))
             if not cands:
@@ -558,25 +557,26 @@ def download_and_extract_icon(key: str, api_url: str) -> bytes | None:
             best = choose_png_for_key(cands, key)
             if not best:
                 continue
-            _, w, h, s, e = best
+            _, _, _, s, e = best
             return content[s:e]
         except Exception:
             continue
     return None
 
-def ensure_icons_present(api_url: str):
+def ensure_icons_in_cache(api_url: str):
+    ICON_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     for key, local_name in ICON_FILES.items():
-        p = LOG_DIR / local_name
-        if p.exists():
+        cache_path = ICON_CACHE_DIR / local_name
+        if cache_path.exists():
             continue
-        data = download_and_extract_icon(key, api_url)
-        if data:
-            p.parent.mkdir(parents=True, exist_ok=True)
-            with open(p, "wb") as f:
-                f.write(data)
-        # If download fails, we proceed without icon (non-fatal)
+        raw = download_and_extract_icon_raw_png(key, api_url)
+        if raw:
+            with open(cache_path, "wb") as f:
+                f.write(raw)
+        # If download fails we render without an icon (non-fatal).
 
 def crop_top_left(img: Image.Image, crop_w=165, crop_h=165) -> Image.Image:
+    """Crop top-left area (used for 256x256 chest art to make it fill better)."""
     w, h = img.size
     cw = min(crop_w, w)
     ch = min(crop_h, h)
@@ -588,29 +588,33 @@ def crop_box(img: Image.Image, left: int, top: int, width: int, height: int) -> 
     left = max(0, left); top = max(0, top)
     return img.crop((left, top, right, lower))
 
-def load_icon_processed(path: Path, key: str, size=ICON_SIZE):
-    if not path.exists():
+def load_icon_processed_from_cache(key: str, size=ICON_SIZE):
+    """Open cached RAW PNG (no disk edits), crop/resize only in memory for rendering."""
+    cache_path = ICON_CACHE_DIR / ICON_FILES[key]
+    if not cache_path.exists():
         return None
     try:
-        img = Image.open(str(path)).convert("RGBA")
+        img = Image.open(str(cache_path)).convert("RGBA")
         w, h = img.size
         if key in ("gold", "silver"):
-            if max(w, h) >= 200:  # 256 art
+            if max(w, h) >= 200:
                 img = crop_top_left(img, 165, 165)
         elif key == "bsc":
             if (w, h) == (128, 128):
                 img = crop_box(img, 4, 4, 64, 64)
-        return img.resize(size, Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS)
+        # gems likely 64x64 → no crop
+        return img.resize(size, RESAMPLE)
     except Exception:
         return None
 
-# Download if missing, then load
-LOG_DIR = Path(LOG_PATH).resolve().parent
-ensure_icons_present(api_url)
-icon_gems   = load_icon_processed(LOG_DIR / ICON_FILES["gems"],   "gems")
-icon_bsc    = load_icon_processed(LOG_DIR / ICON_FILES["bsc"],    "bsc")
-icon_gold   = load_icon_processed(LOG_DIR / ICON_FILES["gold"],   "gold")
-icon_silver = load_icon_processed(LOG_DIR / ICON_FILES["silver"], "silver")
+# 1) Ensure raw PNGs exist in our cache (next to script/exe)
+ensure_icons_in_cache(api_url)
+
+# 2) Load for drawing (crop/resize only in memory)
+icon_gems   = load_icon_processed_from_cache("gems")
+icon_bsc    = load_icon_processed_from_cache("bsc")
+icon_gold   = load_icon_processed_from_cache("gold")
+icon_silver = load_icon_processed_from_cache("silver")
 
 # ========= Draw =========
 def _load_font(path, size):
