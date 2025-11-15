@@ -728,9 +728,9 @@ segments = [
 # Draw
 y0 = 26
 draw_progress_block(y0 + 0*ROW_HEIGHT, gold,   gold_goal_units,   icon_gold,   COLOR_GOLD,
-                    title="Gold-Chests",   meta_suffix=" (1 = 1 BSC)")
+                    title="Gold-Chests",   meta_suffix=" (1 ≈ 1 BSC)")
 draw_progress_block(y0 + 1*ROW_HEIGHT, silver, silver_goal_units, icon_silver, COLOR_SILVER,
-                    title="Silver-Chests", meta_suffix=" (10 = 1 BSC)")
+                    title="Silver-Chests", meta_suffix=" (10 ≈ 1 BSC)")
 draw_progress_block(y0 + 2*ROW_HEIGHT, gems,   gems_goal_units,   icon_gems,   COLOR_GEMS,
                     title="Gems",          meta_suffix=" (500 = 1 BSC)")
 draw_stacked_bsc_block(y0 + 3*ROW_HEIGHT, segments, GOAL_BSC, "Blacksmith Contracts", icon=icon_bsc)
