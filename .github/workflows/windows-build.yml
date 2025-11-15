@@ -3,14 +3,19 @@ name: Windows EXE
 on:
   push:
     branches: [ main ]
+    # optionally also run on tags that look like v1.2.3
+    tags:
+      - 'v*.*.*'
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: windows-latest
+
     defaults:
       run:
         shell: pwsh
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -30,11 +35,20 @@ jobs:
         # Keep this as ONE folded line for PowerShell (no ^ line breaks)
         run: >
           pyinstaller --onefile --noconsole
-          --name IdleChampsOverlay        
+          --name IdleChampsOverlay
           progress_tracker_extended.py
 
-      - name: Upload artifact
+      - name: Upload artifact (Actions)
         uses: actions/upload-artifact@v4
         with:
           name: IdleChampsOverlay-win
           path: dist/IdleChampsOverlay.exe
+
+      # NEW: create a GitHub Release and attach the EXE
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/IdleChampsOverlay.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
