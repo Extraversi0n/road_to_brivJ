@@ -12,6 +12,10 @@ jobs:
   build:
     runs-on: windows-latest
 
+    # 🔴 Add this block:
+    permissions:
+      contents: write
+
     defaults:
       run:
         shell: pwsh
@@ -44,7 +48,6 @@ jobs:
           name: IdleChampsOverlay-win
           path: dist/IdleChampsOverlay.exe
 
-      # NEW: create a GitHub Release and attach the EXE
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
