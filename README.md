@@ -5,8 +5,6 @@
 
 A small tool that generates a **transparent PNG overlay** for *Idle Champions*, showing your progress toward your **Blacksmith Contracts (BSC)** target.
 
-## **You can go to [Releases](https://github.com/Extraversi0n/road_to_brivJ/releases) and just download and use the "IdleChampsOverlay.exe" if you are otherwise unfamiliar with github and python.**
-
 - Reads **only the newest** `getuserdetails` line from `webRequestLog.txt`
 - Calls the API using **POST** (robust; avoids 414)
 - Renders:
@@ -32,16 +30,11 @@ A small tool that generates a **transparent PNG overlay** for *Idle Champions*, 
 
 ## Quick Start (EXE)
 
-1. Download the Windows **EXE** artifact (Actions/Release) and place it in a folder with the icons:
-   ```
-   goldtruhe_icon.png
-   silbertruhe_icon.png
-   gems_icon.png
-   blacksmithcontract_icon.png
-   ```
-2. Double-click the EXE → GUI opens.  
-3. Click **Extract from log** (it reads only the newest `getuserdetails` line).  
-4. Set **BSC goal** and **output** → **Run**.
+1. You can go to [Releases](https://github.com/Extraversi0n/road_to_brivJ/releases) and just download and use the "IdleChampsOverlay.exe" of the latest release if you are otherwise unfamiliar with github and python. 
+2. Double-click the EXE → GUI opens.
+3. Set Locations.
+4. Click **Extract from log** (it reads only the newest `getuserdetails` line).  
+5. Set **BSC goal** and **output** → **Run**.
 
 > Default log path (Steam, typical):  
 > `C:/IdleChampions/IdleDragons_Data/StreamingAssets/downloaded_files/webRequestLog.txt`
