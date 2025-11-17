@@ -5,6 +5,8 @@
 
 A small tool that generates a **transparent PNG overlay** for *Idle Champions*, showing your progress toward your **Blacksmith Contracts (BSC)** target.
 
+## **You can go to [Releases](https://github.com/Extraversi0n/road_to_brivJ/releases) and just download and use the "IdleChampsOverlay.exe" if you are otherwise unfamiliar with github and python.**
+
 - Reads **only the newest** `getuserdetails` line from `webRequestLog.txt`
 - Calls the API using **POST** (robust; avoids 414)
 - Renders:
