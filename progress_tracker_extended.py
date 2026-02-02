@@ -24,6 +24,7 @@ def _set_cwd_to_app_dir():
         os.chdir(base)
     except Exception:
         pass
+
 _set_cwd_to_app_dir()
 
 # App dir + local cache dir (next to script/exe)
@@ -88,6 +89,9 @@ COLOR_BSC_BASE  = ( 80, 170, 255)
 MONTHS_EN = ["", "January", "February", "March", "April", "May", "June",
              "July", "August", "September", "October", "November", "December"]
 
+# Fixed mobile client version (no override / no log detection needed)
+MOBILE_CLIENT_VERSION = "9999"
+
 # ========= CLI (headless etc.) =========
 def parse_cli_args():
     p = argparse.ArgumentParser(description="IdleChamps BSC overlay")
@@ -97,7 +101,6 @@ def parse_cli_args():
     p.add_argument("--goal-bsc", type=int)
     p.add_argument("--user-id")
     p.add_argument("--hash")
-    p.add_argument("--mcv")
     p.add_argument("--api-url")
     p.add_argument("--percent-style", choices=["locale","dot","int"])
     return p.parse_args()
@@ -166,7 +169,6 @@ def show_config_dialog(defaults: dict):
     v_out   = tk.StringVar(value=defaults.get("output_path", OUTPUT_PATH))
     v_uid   = tk.StringVar(value=defaults.get("user_id_override", ""))
     v_hash  = tk.StringVar(value=defaults.get("hash_override", ""))
-    v_mcv   = tk.StringVar(value=defaults.get("mcv_override", ""))
     v_api   = tk.StringVar(value=defaults.get("api_url_override", ""))
     v_rem   = tk.BooleanVar(value=True)
     v_save_creds = tk.BooleanVar(value=False)
@@ -204,8 +206,6 @@ def show_config_dialog(defaults: dict):
                 v_uid.set(kv.get("user_id") or kv.get("internal_user_id"))
             if kv.get("hash") or kv.get("hashh"):
                 v_hash.set(kv.get("hash") or kv.get("hashh"))
-            if kv.get("mobile_client_version"):
-                v_mcv.set(kv.get("mobile_client_version"))
             if api:
                 v_api.set(api)
             messagebox.showinfo("Extracted", "Values extracted from latest getuserdetails line.")
@@ -232,7 +232,6 @@ def show_config_dialog(defaults: dict):
             "output_path": v_out.get().strip(),
             "user_id_override": v_uid.get().strip(),
             "hash_override": v_hash.get().strip(),
-            "mcv_override": v_mcv.get().strip(),
             "api_url_override": v_api.get().strip(),
         }
         if save_it and v_rem.get():
@@ -280,18 +279,15 @@ def show_config_dialog(defaults: dict):
     e_hash.grid(row=5, column=1, sticky="w", **pad)
     tk.Checkbutton(root, text="show", variable=v_show_hash, command=toggle_hash_show).grid(row=5, column=1, sticky="e", padx=10)
 
-    tk.Label(root, text="mobile_client_version:").grid(row=6, column=0, sticky="w", **pad)
-    tk.Entry(root, textvariable=v_mcv, width=28).grid(row=6, column=1, sticky="w", **pad)
+    tk.Label(root, text="post.php URL:").grid(row=6, column=0, sticky="w", **pad)
+    tk.Entry(root, textvariable=v_api, width=48).grid(row=6, column=1, sticky="w", **pad)
 
-    tk.Label(root, text="post.php URL:").grid(row=7, column=0, sticky="w", **pad)
-    tk.Entry(root, textvariable=v_api, width=48).grid(row=7, column=1, sticky="w", **pad)
-
-    f8 = tk.Frame(root); f8.grid(row=8, column=0, columnspan=2, sticky="we", padx=10, pady=4)
+    f8 = tk.Frame(root); f8.grid(row=7, column=0, columnspan=2, sticky="we", padx=10, pady=4)
     tk.Button(f8, text="Extract from log", command=extract_from_log).pack(side="left")
     tk.Checkbutton(f8, text="Remember settings", variable=v_rem).pack(side="left", padx=12)
     tk.Checkbutton(f8, text="Save user_id/hash to config", variable=v_save_creds).pack(side="left", padx=12)
 
-    bf = tk.Frame(root); bf.grid(row=9, column=0, columnspan=2, sticky="e", padx=10, pady=10)
+    bf = tk.Frame(root); bf.grid(row=8, column=0, columnspan=2, sticky="e", padx=10, pady=10)
     btn_skip = tk.Button(bf, text="Skip (use saved)", command=do_skip, state=("normal" if defaults else "disabled"))
     btn_skip.pack(side="left", padx=4)
     tk.Button(bf, text="Run", command=lambda: do_run(save_it=False)).pack(side="left", padx=4)
@@ -316,7 +312,6 @@ if _args.headless:
     if _args.goal_bsc:  _cfg["goal_bsc"]     = _args.goal_bsc
     if _args.user_id:   _cfg["user_id_override"] = _args.user_id
     if _args.hash:      _cfg["hash_override"]    = _args.hash
-    if _args.mcv:       _cfg["mcv_override"]     = _args.mcv
     if _args.api_url:   _cfg["api_url_override"] = _args.api_url
     _cfg.setdefault("log_path", LOG_PATH)
     _cfg.setdefault("output_path", OUTPUT_PATH)
@@ -329,7 +324,6 @@ OUTPUT_PATH = _cfg.get("output_path", OUTPUT_PATH)
 GOAL_BSC    = int(_cfg.get("goal_bsc", GOAL_BSC))
 USER_ID_OVERRIDE = (_cfg.get("user_id_override") or "").strip()
 HASH_OVERRIDE    = (_cfg.get("hash_override") or "").strip()
-MCV_OVERRIDE     = (_cfg.get("mcv_override") or "").strip()
 API_URL_OVERRIDE = (_cfg.get("api_url_override") or "").strip()
 
 # ========= Read log & build API call =========
@@ -354,7 +348,6 @@ if not api_url:
 kv = parse_kv_from_line(line) if line else {}
 user_id = USER_ID_OVERRIDE or kv.get("user_id") or kv.get("internal_user_id")
 hash_val = HASH_OVERRIDE or kv.get("hash") or kv.get("hashh")
-mcv      = MCV_OVERRIDE or kv.get("mobile_client_version") or "633"
 if not user_id or not hash_val:
     raise Exception("user_id or hash missing (override or log).")
 
@@ -368,7 +361,7 @@ params = {
     "request_id": kv.get("request_id", "0"),
     "language_id": kv.get("language_id", "1"),
     "network_id": kv.get("network_id", "21"),
-    "mobile_client_version": mcv,
+    "mobile_client_version": MOBILE_CLIENT_VERSION,
     "localization_aware": kv.get("localization_aware", "true"),
 }
 headers = {"User-Agent": "Mozilla/5.0"}
