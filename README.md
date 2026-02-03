@@ -1,40 +1,37 @@
 # Road to BrivJ – Overlay
-![Windows EXE](https://github.com/Extraversi0n/road_to_brivJ/actions/workflows/windows-build.yml/badge.svg)
 
-![Overlay example](docs/overlay_example.png)
+A small tool that generates a transparent PNG overlay for :contentReference[oaicite:1]{index=1}, showing your progress toward your Blacksmith Contracts (BSC) target.
 
-A small tool that generates a **transparent PNG overlay** for *Idle Champions*, showing your progress toward your **Blacksmith Contracts (BSC)** target.
-
-- Reads **only the newest** `getuserdetails` line from `webRequestLog.txt`
+- Reads only the newest `getuserdetails` line from `webRequestLog.txt`
 - Calls the API using **POST** (robust; avoids 414)
 - Renders:
-  - **Stacked BSC** (Base + projection from **Gold** / **Silver** / **Gems**, all in BSC units)
-  - **Resource bars**: “How many **units** would you still need if you finished the goal using only this resource?”  
-    *(= overall remaining + your current contribution from that resource)*
+  - **Stacked BSC** (Base + projection from Gold / Silver / Gems, all in BSC units)
+  - **Resource bars**: “How many units would you still need if you finished the goal using only this resource?”
+    (= overall remaining + your current contribution from that resource)
 
 ---
 
 ## Features
 
-- **GUI (default)**  
-  - Pick `webRequestLog.txt`, set **BSC goal** and **output path**  
-  - **Extract from log**: auto-fills `user_id`, `hash`, `mobile_client_version`, and `post.php` URL  
-  - Manual **overrides** available (hash masked with a “show” toggle)  
-  - **Save & Run** or **Skip (use saved)** (persists to `tracker_config.json`)
+- **GUI (default)**
+  - Pick `webRequestLog.txt`, set BSC goal and output path
+  - **Extract from log**: auto-fills `user_id`, `hash`, and the `post.php` URL
+  - Manual overrides available (hash masked with a “show” toggle)
+  - Save & Run or Skip (use saved) (persists to `tracker_config.json`)
 - **Headless mode** for Task Scheduler/scripts: `--headless` (no GUI)
-- **Locale-aware integers** (thousand separators) & configurable **percent style**  
+- Locale-aware integers (thousand separators) & configurable percent style  
   (`--percent-style locale|dot|int`)
-- **EXE-friendly**: bundled icons, TLS via `certifi`, font fallback, no console window
+- EXE-friendly: icon caching, TLS via `certifi`, font fallback
 
 ---
 
 ## Quick Start (EXE)
 
-1. You can go to [Releases](https://github.com/Extraversi0n/road_to_brivJ/releases) and just download and use the "IdleChampsOverlay.exe" of the latest release if you are otherwise unfamiliar with github and python. 
+1. Go to **Releases** and download the latest `IdleChampsOverlay.exe`.
 2. Double-click the EXE → GUI opens.
-3. Set Locations.
-4. Click **Extract from log** (it reads only the newest `getuserdetails` line).  
-5. Set **BSC goal** and **output** → **Run**.
+3. Set locations.
+4. Click **Extract from log** (it reads only the newest `getuserdetails` line).
+5. Set BSC goal and output → Run.
 
 > Default log path (Steam, typical):  
 > `C:/IdleChampions/IdleDragons_Data/StreamingAssets/downloaded_files/webRequestLog.txt`
@@ -43,19 +40,16 @@ A small tool that generates a **transparent PNG overlay** for *Idle Champions*, 
 
 ## Run from Source
 
-**Requirements**
-- Windows + Idle Champions (recent `webRequestLog.txt`)
-- Python **3.9+** (tested 3.10–3.12)
-- Dependencies:
-  ```bash
-  pip install -r requirements.txt
-  # or:
-  pip install pillow requests certifi
-  ```
+### Requirements
 
-**Run**
+- Windows + :contentReference[oaicite:2]{index=2} (recent `webRequestLog.txt`)
+- Python 3.9+ (tested 3.10–3.12)
+- Dependencies:
+
 ```bash
-python progress_tracker_extended.py
+pip install -r requirements.txt
+# or:
+pip install pillow requests certifi
 ```
 
 ---
@@ -82,13 +76,12 @@ pythonw.exe progress_tracker_extended.py --headless --percent-style locale
 --goal-bsc INT             target in BSC units
 --user-id ID               override user_id
 --hash VALUE               override hash
---mcv VALUE                override mobile_client_version
 --api-url URL              override post.php URL
 --percent-style [locale|dot|int]
                            percentage style: OS locale, always dot, or integer
 ```
 
-> Leave overrides empty and the app auto-extracts values from the **newest** `getuserdetails` log line.
+> Leave overrides empty and the app auto-extracts values from the newest getuserdetails log line.
 
 ### Windows Task Scheduler (EXE)
 1. **Program/script:** full path to `IdleChampsOverlay.exe`  
@@ -112,11 +105,19 @@ IdleChampsOverlay.exe --headless --percent-style locale >nul 2>&1
 ## How It Works (quick)
 
 - Reads only the **newest** `getuserdetails` line from the log
-- Extracts `user_id`, `hash`/`hashh`, `mobile_client_version`, **post.php** URL  
+- Extracts `user_id`, `hash`/`hashh`, and the **post.php** URL  
   (or derives the URL from `play_server`)
 - Uses **POST** (not GET)
 - **Stacked BSC**: Base + Gold + Silver + Gems in BSC  
 - **Resource bars**: unit requirements = global remaining **+** this resource’s contribution
+
+---
+
+## Icons & Cache
+
+The script will cache downloaded icon PNGs next to the EXE/script in:
+- `overlay_icon_cache/`
+If icon downloads fail (network, TLS, etc.), the overlay still renders (just without icons).
 
 ---
 
