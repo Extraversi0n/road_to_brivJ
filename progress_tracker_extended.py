@@ -15,7 +15,8 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qsl
 from datetime import datetime
 from typing import Optional
-from PIL import Image, ImageDraw, ImageFont as _IF
+
+from PIL import Image, ImageDraw, ImageFont as _IF, ImageChops
 
 # ========= Working dir (EXE/script) =========
 def _set_cwd_to_app_dir():
@@ -26,10 +27,7 @@ def _set_cwd_to_app_dir():
         pass
 
 _set_cwd_to_app_dir()
-
-# App dir + local cache dir (next to script/exe)
-from pathlib import Path as _PathAlias
-APP_DIR = _PathAlias.cwd()
+APP_DIR = Path.cwd()
 ICON_CACHE_DIR = APP_DIR / "overlay_icon_cache"
 
 # ========= Locale formatting =========
@@ -44,68 +42,76 @@ def fmt_int(n: int) -> str:
     except Exception:
         return f"{int(n)}"
 
-# Percent display style: "locale" | "dot" | "int"
 PERCENT_STYLE = "locale"
 
-def percent_str(value, goal, style=PERCENT_STYLE):
-    p = 100.0 if goal <= 0 else min(1.0, (value / goal)) * 100.0
+def percent_str(value, goal, style=None):
+    style = style or PERCENT_STYLE
+    p = 100.0 if goal <= 0 else min(1.0, (float(value) / float(goal))) * 100.0
     if style == "int":
         return f"{int(round(p))}%"
-    s = f"{p:.2f}"  # two decimals
+    s = f"{p:.2f}"
     if style == "locale":
         dec = locale.localeconv().get("decimal_point", ".") or "."
         s = s.replace(".", dec)
-    else:  # "dot"
+    else:
         s = s.replace(",", ".")
     return s + "%"
 
-# ========= Defaults =========
-LOG_PATH    = r"C:/IdleChampions/IdleChampions/IdleDragons_Data/StreamingAssets/downloaded_files/webRequestLog.txt"
+# ========= Defaults (original spacing) =========
+LOG_PATH = r"C:/IdleChampions/IdleChampions/IdleDragons_Data/StreamingAssets/downloaded_files/webRequestLog.txt"
 OUTPUT_PATH = "overlay_extended.png"
-GOAL_BSC    = 15_360_005
+GOAL_BSC = 15_360_005
 
-FONT_MED_PATH   = "arial.ttf"
+FONT_MED_PATH = "arial.ttf"
 FONT_SMALL_PATH = "arial.ttf"
 
-IMG_WIDTH   = 950
-ROW_HEIGHT  = 84
-PADDING     = 16
-ICON_SIZE   = (56, 56)
-BAR_WIDTH   = 520
-BAR_HEIGHT  = 22
+IMG_WIDTH = 950
+ROW_HEIGHT = 84
+PADDING = 16
+ICON_SIZE = (56, 56)
+BAR_WIDTH = 520
+BAR_HEIGHT = 22
 
 TITLE_BAR_GAP = 10
-LEGEND_GAP    = 6
-BAR_OUTLINE   = (58, 58, 58)
+LEGEND_GAP = 6
+BAR_OUTLINE = (58, 58, 58)
 SEGMENT_SEPARATOR = (25, 25, 25)
 SHOW_SEG_SEPARATORS = False
 
-# Colors
-COLOR_GOLD      = (255, 215,   0)
-COLOR_SILVER    = (192, 192, 192)
-COLOR_GEMS      = (100, 200, 150)
-COLOR_BSC_BASE  = ( 80, 170, 255)
+COLOR_GOLD = (255, 215, 0)
+COLOR_SILVER = (192, 192, 192)
+COLOR_GEMS = (100, 200, 150)
+COLOR_BSC_BASE = (80, 170, 255)
+COLOR_EVENT = (180, 120, 255)
 
 MONTHS_EN = ["", "January", "February", "March", "April", "May", "June",
              "July", "August", "September", "October", "November", "December"]
 
-# Fixed mobile client version (no override / no log detection needed)
 MOBILE_CLIENT_VERSION = "9999"
 
-# ========= CLI (headless etc.) =========
+# ========= Event chest averages =========
+EVENT_SILVER_ILVL_AVG = 2.10887097
+EVENT_GOLD_ILVL_AVG = 14.41267674
+
+# ========= CLI =========
 def parse_cli_args():
     p = argparse.ArgumentParser(description="IdleChamps BSC overlay")
     p.add_argument("--headless", action="store_true", help="run without GUI dialog")
     p.add_argument("--log-path")
     p.add_argument("--output")
     p.add_argument("--goal-bsc", type=int)
-    p.add_argument("--user-id")
-    p.add_argument("--hash")
+    p.add_argument("--user-id")   # override only
+    p.add_argument("--hash")      # override only
     p.add_argument("--api-url")
-    p.add_argument("--percent-style", choices=["locale","dot","int"])
+    p.add_argument("--percent-style", choices=["locale", "dot", "int"])
+    # Event overrides (optional)
+    p.add_argument("--event-enable", action="store_true")
+    p.add_argument("--event-name")
+    p.add_argument("--event-silver-id", type=int)
+    p.add_argument("--event-gold-id", type=int)
     return p.parse_args()
 
-# ========= Config file =========
+# ========= Config =========
 CONFIG_FILE = "tracker_config.json"
 
 def load_config():
@@ -121,7 +127,7 @@ def save_config(cfg: dict):
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
 
-# ========= Log-line parsing =========
+# ========= Log parsing =========
 def find_latest_getuserdetails_line(text: str) -> Optional[str]:
     for line in reversed(text.splitlines()):
         if "getuserdetails" in line.lower():
@@ -134,16 +140,13 @@ def extract_post_url_from_line(line: str) -> Optional[str]:
 
 def parse_kv_from_line(line: str) -> dict:
     out = {}
-    # JSON-ish "k":"v"
     for k, v in re.findall(r'"([A-Za-z0-9_]+)"\s*:\s*"([^"]+)"', line):
         out[k] = v
-    # JSON-ish "k":123
     for k, v in re.findall(r'"([A-Za-z0-9_]+)"\s*:\s*([A-Za-z0-9_.-]+)', line):
-        out[k] = v
-    # key=value pairs
+        if k not in out:
+            out[k] = v
     for k, v in re.findall(r'([A-Za-z0-9_]+)\s*=\s*([^\s&"\'<>#]+)', line):
         out[k] = v
-    # query params inside URLs
     for url in re.findall(r'https?://[^\s"\'<>]+', line):
         try:
             q = dict(parse_qsl(urlparse(url).query, keep_blank_values=True))
@@ -152,7 +155,26 @@ def parse_kv_from_line(line: str) -> dict:
             pass
     return out
 
-# ========= GUI (unless headless) =========
+# ========= Helpers =========
+def safe_int(v, default=0):
+    try:
+        return int(v)
+    except Exception:
+        try:
+            return int(float(v))
+        except Exception:
+            return default
+
+def get_nested(d, path, default=None):
+    cur = d
+    for part in path.split("."):
+        if isinstance(cur, dict) and part in cur:
+            cur = cur[part]
+        else:
+            return default
+    return cur
+
+# ========= GUI =========
 def show_config_dialog(defaults: dict):
     try:
         import tkinter as tk
@@ -160,143 +182,188 @@ def show_config_dialog(defaults: dict):
     except Exception:
         return defaults or {}
 
+    defaults = defaults or {}
     root = tk.Tk()
     root.title("IdleChamps Overlay – Settings")
-    root.resizable(False, False)
+    root.columnconfigure(1, weight=1)
 
-    v_log   = tk.StringVar(value=defaults.get("log_path", LOG_PATH))
-    v_goal  = tk.StringVar(value=str(defaults.get("goal_bsc", GOAL_BSC)))
-    v_out   = tk.StringVar(value=defaults.get("output_path", OUTPUT_PATH))
-    v_uid   = tk.StringVar(value=defaults.get("user_id_override", ""))
-    v_hash  = tk.StringVar(value=defaults.get("hash_override", ""))
-    v_api   = tk.StringVar(value=defaults.get("api_url_override", ""))
-    v_rem   = tk.BooleanVar(value=True)
-    v_save_creds = tk.BooleanVar(value=False)
-    v_show_hash  = tk.BooleanVar(value=False)
+    def row_label(text, r, c=0):
+        tk.Label(root, text=text).grid(row=r, column=c, sticky="w", padx=8, pady=4)
 
-    def pick_log():
-        p = filedialog.askopenfilename(
-            title="Select webRequestLog.txt",
-            filetypes=[("webRequestLog.txt","webRequestLog.txt"), ("Text files","*.txt"), ("All files","*.*")]
-        )
-        if p: v_log.set(p)
+    def row_entry(var, r, c=1, width=60, show=None):
+        e = tk.Entry(root, textvariable=var, width=width, show=show)
+        e.grid(row=r, column=c, sticky="we", padx=8, pady=4)
+        return e
 
-    def pick_out():
-        d = filedialog.askdirectory(title="Select output folder")
-        if d: v_out.set(os.path.join(d, "overlay_extended.png"))
+    v_log = tk.StringVar(value=defaults.get("log_path", LOG_PATH))
+    v_out = tk.StringVar(value=defaults.get("output_path", OUTPUT_PATH))
+    v_goal = tk.StringVar(value=str(defaults.get("goal_bsc", GOAL_BSC)))
+    v_api = tk.StringVar(value=defaults.get("api_url_override", ""))
+
+    # Creds: if save_creds==True -> prefill; else blank
+    save_creds_prev = bool(defaults.get("save_creds", False))
+    v_save_creds = tk.BooleanVar(value=save_creds_prev)
+    v_user = tk.StringVar(value=(defaults.get("user_id_override", "") if save_creds_prev else ""))
+    v_hash = tk.StringVar(value=(defaults.get("hash_override", "") if save_creds_prev else ""))
+    v_show_hash = tk.BooleanVar(value=False)
+
+    # Event (total bar only)
+    v_event_enable = tk.BooleanVar(value=bool(defaults.get("event_enable", False)))
+    v_event_name = tk.StringVar(value=str(defaults.get("event_name", "Briv")))
+    v_event_silver = tk.StringVar(value=str(defaults.get("event_silver_id", 174)))
+    v_event_gold = tk.StringVar(value=str(defaults.get("event_gold_id", 175)))
+
+    out_cfg = {}
+
+    def browse_log():
+        p = filedialog.askopenfilename(title="Select webRequestLog.txt",
+                                       filetypes=[("Text", "*.txt"), ("All", "*.*")])
+        if p:
+            v_log.set(p)
+
+    def browse_out():
+        p = filedialog.asksaveasfilename(title="Select output PNG",
+                                         defaultextension=".png",
+                                         filetypes=[("PNG", "*.png"), ("All", "*.*")])
+        if p:
+            v_out.set(p)
+
+    def toggle_hash():
+        e_hash.config(show="" if v_show_hash.get() else "•")
+
+    def safe_int_field(s, fallback):
+        try:
+            return int(str(s).strip())
+        except Exception:
+            return fallback
 
     def extract_from_log():
         try:
-            with open(v_log.get().strip(), "r", encoding="utf-8") as f:
-                text = f.read()
-            line = find_latest_getuserdetails_line(text)
-            if not line:
-                messagebox.showerror("Not found", "No 'getuserdetails' entry found.")
+            with open(v_log.get(), "r", encoding="utf-8") as f:
+                txt = f.read()
+            ln = find_latest_getuserdetails_line(txt)
+            if not ln:
+                messagebox.showwarning("Not found", "No getuserdetails line found in the log.")
                 return
-            kv = parse_kv_from_line(line)
-            api = extract_post_url_from_line(line)
-            if not api:
-                m = re.search(r'"play_server"\s*:\s*"([^"]+)"', line) or re.search(r'play_server\s*=\s*([^\s&"\'<>#]+)', line)
-                if m:
-                    ps = m.group(1).replace(r"\/", "/")
+            kv = parse_kv_from_line(ln)
+            api_u = extract_post_url_from_line(ln)
+
+            if not api_u:
+                ps = kv.get("play_server") or ""
+                if ps:
+                    ps = ps.replace(r"\/", "/")
                     if not ps.endswith("/"):
                         ps += "/"
-                    api = f"{ps}post.php"
+                    api_u = ps + "post.php"
+
+            if api_u:
+                v_api.set(api_u)
             if kv.get("user_id") or kv.get("internal_user_id"):
-                v_uid.set(kv.get("user_id") or kv.get("internal_user_id"))
+                v_user.set(kv.get("user_id") or kv.get("internal_user_id"))
             if kv.get("hash") or kv.get("hashh"):
                 v_hash.set(kv.get("hash") or kv.get("hashh"))
-            if api:
-                v_api.set(api)
-            messagebox.showinfo("Extracted", "Values extracted from latest getuserdetails line.")
+
+            messagebox.showinfo("Extracted",
+                                "Extracted values from newest getuserdetails line.\n"
+                                "Stored only if 'Save user_id/hash' is checked.")
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to extract:\n{e}")
+            messagebox.showerror("Error", f"Failed to extract from log:\n{e}")
 
-    def validate_goal(text):
-        try:
-            return int(text.replace("_","").strip()) > 0
-        except Exception:
-            return False
+    def on_save_run():
+        nonlocal out_cfg
 
-    result = {}
-
-    def do_run(save_it: bool):
-        g = v_goal.get().strip()
-        if not validate_goal(g):
-            from tkinter import messagebox
-            messagebox.showerror("Invalid goal", "Please enter a positive integer for BSC goal.")
-            return
-        cfg = {
+        run_cfg = {
             "log_path": v_log.get().strip(),
-            "goal_bsc": int(g.replace("_","")),
             "output_path": v_out.get().strip(),
-            "user_id_override": v_uid.get().strip(),
-            "hash_override": v_hash.get().strip(),
+            "goal_bsc": safe_int_field(v_goal.get(), GOAL_BSC),
             "api_url_override": v_api.get().strip(),
+
+            "event_enable": bool(v_event_enable.get()),
+            "event_name": (v_event_name.get().strip() or "Briv"),
+            "event_silver_id": safe_int_field(v_event_silver.get(), 174),
+            "event_gold_id": safe_int_field(v_event_gold.get(), 175),
+
+            "user_id_override": v_user.get().strip(),
+            "hash_override": v_hash.get().strip(),
         }
-        if save_it and v_rem.get():
-            to_save = cfg.copy()
-            if not v_save_creds.get():
-                to_save["user_id_override"] = ""
-                to_save["hash_override"] = ""
+
+        # Save settings; if checkbox OFF, remove creds from config
+        to_save = dict(run_cfg)
+        if v_save_creds.get():
+            to_save["save_creds"] = True
+        else:
+            to_save["save_creds"] = False
+            to_save["user_id_override"] = ""
+            to_save["hash_override"] = ""
+
+        try:
             save_config(to_save)
-        result["cfg"] = cfg
+        except Exception:
+            pass
+
+        out_cfg = run_cfg
         root.destroy()
 
-    def do_skip():
-        if not defaults:
-            from tkinter import messagebox
-            messagebox.showinfo("No saved settings", "No saved settings found yet.")
-            return
-        result["cfg"] = defaults
+    def on_cancel():
+        nonlocal out_cfg
+        out_cfg = defaults
         root.destroy()
 
-    def toggle_hash_show():
-        e_hash.configure(show="" if v_show_hash.get() else "•")
+    r = 0
+    row_label("Log path (webRequestLog.txt)", r); row_entry(v_log, r)
+    tk.Button(root, text="Browse", command=browse_log).grid(row=r, column=2, padx=8, pady=4)
 
-    pad = {"padx": 10, "pady": 6}
+    r += 1
+    row_label("Output PNG", r); row_entry(v_out, r)
+    tk.Button(root, text="Browse", command=browse_out).grid(row=r, column=2, padx=8, pady=4)
 
-    tk.Label(root, text="webRequestLog.txt:").grid(row=0, column=0, sticky="w", **pad)
-    f0 = tk.Frame(root); f0.grid(row=0, column=1, sticky="we", **pad)
-    e0 = tk.Entry(f0, textvariable=v_log, width=48); e0.pack(side="left", fill="x", expand=True)
-    tk.Button(f0, text="Browse…", command=pick_log).pack(side="left", padx=6)
+    r += 1
+    row_label("Goal (BSC)", r); row_entry(v_goal, r, width=20)
 
-    tk.Label(root, text="BSC Goal:").grid(row=1, column=0, sticky="w", **pad)
-    tk.Entry(root, textvariable=v_goal, width=20).grid(row=1, column=1, sticky="w", **pad)
+    r += 1
+    tk.Button(root, text="Extract from log", command=extract_from_log).grid(row=r, column=0, padx=8, pady=8, sticky="w")
 
-    tk.Label(root, text="Output image:").grid(row=2, column=0, sticky="w", **pad)
-    f2 = tk.Frame(root); f2.grid(row=2, column=1, sticky="we", **pad)
-    e2 = tk.Entry(f2, textvariable=v_out, width=48); e2.pack(side="left", fill="x", expand=True)
-    tk.Button(f2, text="Folder…", command=pick_out).pack(side="left", padx=6)
+    r += 1
+    row_label("API URL override (post.php)", r); row_entry(v_api, r)
 
-    tk.Label(root, text="— Overrides (optional) —").grid(row=3, column=0, columnspan=2, sticky="w", padx=10)
+    r += 1
+    row_label("User ID", r); row_entry(v_user, r, width=30)
 
-    tk.Label(root, text="user_id:").grid(row=4, column=0, sticky="w", **pad)
-    tk.Entry(root, textvariable=v_uid, width=28).grid(row=4, column=1, sticky="w", **pad)
+    r += 1
+    row_label("Hash", r)
+    e_hash = row_entry(v_hash, r, width=40, show="•")
+    tk.Checkbutton(root, text="Show", variable=v_show_hash, command=toggle_hash).grid(row=r, column=2, padx=8, pady=4)
 
-    tk.Label(root, text="hash:").grid(row=5, column=0, sticky="w", **pad)
-    e_hash = tk.Entry(root, textvariable=v_hash, width=28, show="•")
-    e_hash.grid(row=5, column=1, sticky="w", **pad)
-    tk.Checkbutton(root, text="show", variable=v_show_hash, command=toggle_hash_show).grid(row=5, column=1, sticky="e", padx=10)
+    r += 1
+    tk.Checkbutton(root, text="Save user_id/hash to config (local)", variable=v_save_creds).grid(
+        row=r, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 8)
+    )
 
-    tk.Label(root, text="post.php URL:").grid(row=6, column=0, sticky="w", **pad)
-    tk.Entry(root, textvariable=v_api, width=48).grid(row=6, column=1, sticky="w", **pad)
+    r += 1
+    tk.Label(root, text="— Champion Event Chests (TOTAL bar only) —").grid(
+        row=r, column=0, columnspan=3, sticky="w", padx=8, pady=(14, 4)
+    )
 
-    f8 = tk.Frame(root); f8.grid(row=7, column=0, columnspan=2, sticky="we", padx=10, pady=4)
-    tk.Button(f8, text="Extract from log", command=extract_from_log).pack(side="left")
-    tk.Checkbutton(f8, text="Remember settings", variable=v_rem).pack(side="left", padx=12)
-    tk.Checkbutton(f8, text="Save user_id/hash to config", variable=v_save_creds).pack(side="left", padx=12)
+    r += 1
+    tk.Checkbutton(root, text="Enable Champion Event Chests", variable=v_event_enable).grid(
+        row=r, column=0, columnspan=3, sticky="w", padx=8, pady=4
+    )
 
-    bf = tk.Frame(root); bf.grid(row=8, column=0, columnspan=2, sticky="e", padx=10, pady=10)
-    btn_skip = tk.Button(bf, text="Skip (use saved)", command=do_skip, state=("normal" if defaults else "disabled"))
-    btn_skip.pack(side="left", padx=4)
-    tk.Button(bf, text="Run", command=lambda: do_run(save_it=False)).pack(side="left", padx=4)
-    tk.Button(bf, text="Save & Run", command=lambda: do_run(save_it=True)).pack(side="left", padx=4)
-    tk.Button(bf, text="Cancel", command=root.destroy).pack(side="left", padx=4)
+    r += 1
+    row_label("Champion Name", r); row_entry(v_event_name, r, width=20)
 
-    e0.focus_set()
+    r += 1
+    row_label("Silver Chest ID", r); row_entry(v_event_silver, r, width=10)
+
+    r += 1
+    row_label("Gold Chest ID", r); row_entry(v_event_gold, r, width=10)
+
+    r += 1
+    tk.Button(root, text="Save & Run", command=on_save_run).grid(row=r, column=1, padx=8, pady=12, sticky="e")
+    tk.Button(root, text="Cancel", command=on_cancel).grid(row=r, column=2, padx=8, pady=12, sticky="w")
+
     root.mainloop()
-    return result.get("cfg", defaults or {})
+    return out_cfg or defaults
 
 # ========= Apply CLI + GUI/headless =========
 _args = parse_cli_args()
@@ -307,24 +374,37 @@ _saved = load_config()
 
 if _args.headless:
     _cfg = dict(_saved) if _saved else {}
-    if _args.log_path:  _cfg["log_path"]     = _args.log_path
-    if _args.output:    _cfg["output_path"]  = _args.output
-    if _args.goal_bsc:  _cfg["goal_bsc"]     = _args.goal_bsc
-    if _args.user_id:   _cfg["user_id_override"] = _args.user_id
-    if _args.hash:      _cfg["hash_override"]    = _args.hash
-    if _args.api_url:   _cfg["api_url_override"] = _args.api_url
+    if _args.log_path: _cfg["log_path"] = _args.log_path
+    if _args.output: _cfg["output_path"] = _args.output
+    if _args.goal_bsc: _cfg["goal_bsc"] = _args.goal_bsc
+    if _args.api_url: _cfg["api_url_override"] = _args.api_url
+    if _args.user_id: _cfg["user_id_override"] = _args.user_id
+    if _args.hash: _cfg["hash_override"] = _args.hash
+
+    if _args.event_enable: _cfg["event_enable"] = True
+    if _args.event_name: _cfg["event_name"] = _args.event_name
+    if _args.event_silver_id is not None: _cfg["event_silver_id"] = _args.event_silver_id
+    if _args.event_gold_id is not None: _cfg["event_gold_id"] = _args.event_gold_id
+
     _cfg.setdefault("log_path", LOG_PATH)
     _cfg.setdefault("output_path", OUTPUT_PATH)
     _cfg.setdefault("goal_bsc", GOAL_BSC)
 else:
     _cfg = show_config_dialog(_saved)
 
-LOG_PATH    = _cfg.get("log_path", LOG_PATH)
+LOG_PATH = _cfg.get("log_path", LOG_PATH)
 OUTPUT_PATH = _cfg.get("output_path", OUTPUT_PATH)
-GOAL_BSC    = int(_cfg.get("goal_bsc", GOAL_BSC))
-USER_ID_OVERRIDE = (_cfg.get("user_id_override") or "").strip()
-HASH_OVERRIDE    = (_cfg.get("hash_override") or "").strip()
+GOAL_BSC = int(_cfg.get("goal_bsc", GOAL_BSC))
 API_URL_OVERRIDE = (_cfg.get("api_url_override") or "").strip()
+
+save_creds_effective = bool(_cfg.get("save_creds", False))
+USER_ID_OVERRIDE = (_cfg.get("user_id_override") or "").strip() if (save_creds_effective or _args.headless) else ""
+HASH_OVERRIDE = (_cfg.get("hash_override") or "").strip() if (save_creds_effective or _args.headless) else ""
+
+EVENT_ENABLE = bool(_cfg.get("event_enable", False))
+EVENT_NAME = (_cfg.get("event_name") or "Briv").strip() or "Briv"
+EVENT_SILVER_ID = str(_cfg.get("event_silver_id", 174))
+EVENT_GOLD_ID = str(_cfg.get("event_gold_id", 175))
 
 # ========= Read log & build API call =========
 with open(LOG_PATH, "r", encoding="utf-8") as f:
@@ -335,17 +415,19 @@ if not line and not (USER_ID_OVERRIDE and HASH_OVERRIDE and API_URL_OVERRIDE):
     raise Exception("Could not find a 'getuserdetails' line and no overrides provided.")
 
 api_url = API_URL_OVERRIDE or (extract_post_url_from_line(line) if line else None)
+kv = parse_kv_from_line(line) if line else {}
+
 if not api_url and line:
-    m = re.search(r'"play_server"\s*:\s*"([^"]+)"', line) or re.search(r'play_server\s*=\s*([^\s&"\'<>#]+)', line)
-    if m:
-        ps = m.group(1).replace(r"\/", "/")
+    ps = kv.get("play_server", "")
+    if ps:
+        ps = ps.replace(r"\/", "/")
         if not ps.endswith("/"):
             ps += "/"
-        api_url = f"{ps}post.php"
+        api_url = ps + "post.php"
+
 if not api_url:
     raise Exception("Could not determine post.php URL (override or log).")
 
-kv = parse_kv_from_line(line) if line else {}
 user_id = USER_ID_OVERRIDE or kv.get("user_id") or kv.get("internal_user_id")
 hash_val = HASH_OVERRIDE or kv.get("hash") or kv.get("hashh")
 if not user_id or not hash_val:
@@ -366,130 +448,113 @@ params = {
 }
 headers = {"User-Agent": "Mozilla/5.0"}
 
-try:
-    print("🔍 API:", api_url)
-except UnicodeEncodeError:
-    print("API:", api_url)
-
 resp = requests.post(api_url, data=params, headers=headers, timeout=30, verify=certifi.where())
 if resp.status_code != 200 or not resp.text.strip().startswith("{"):
     snippet = resp.text[:200].replace("\n", " ")
     raise Exception(f"Invalid API response: {resp.status_code} | {snippet}")
 data = resp.json()
 
-# ========= Values & conversions =========
-def safe_int(v, default=0):
-    try:
-        return int(v)
-    except Exception:
-        try:
-            return int(float(v))
-        except Exception:
-            return default
-
-def get_nested(d, path, default=None):
-    cur = d
-    for part in path.split("."):
-        if isinstance(cur, dict) and part in cur:
-            cur = cur[part]
-        else:
-            return default
-    return cur
-
+# ========= Values =========
 chests = data.get("details", {}).get("chests", {})
-gold   = safe_int(chests.get("2", 0))
+gold = safe_int(chests.get("2", 0))
 silver = safe_int(chests.get("1", 0))
-gems   = safe_int(get_nested(data, "details.red_rubies", 0))
+gems = safe_int(get_nested(data, "details.red_rubies", 0))
 
-BSC_WEIGHTS = {31:1, 32:2, 33:6, 34:24, 1797:120}
+event_silver_cnt = safe_int(chests.get(EVENT_SILVER_ID, 0)) if EVENT_ENABLE else 0
+event_gold_cnt = safe_int(chests.get(EVENT_GOLD_ID, 0)) if EVENT_ENABLE else 0
+event_total_bsc = int(round(event_silver_cnt * EVENT_SILVER_ILVL_AVG + event_gold_cnt * EVENT_GOLD_ILVL_AVG)) if EVENT_ENABLE else 0
+
+# Base BSC from buffs
+BSC_WEIGHTS = {31: 1, 32: 2, 33: 6, 34: 24, 1797: 120}
 
 def find_contract_buffs_anywhere(obj):
     if isinstance(obj, list):
+        # list of buffs?
         if obj and isinstance(obj[0], dict) and 'buff_id' in obj[0] and 'inventory_amount' in obj[0]:
             return obj
         for item in obj:
             res = find_contract_buffs_anywhere(item)
-            if res: return res
+            if res:
+                return res
     elif isinstance(obj, dict):
         for v in obj.values():
             res = find_contract_buffs_anywhere(v)
-            if res: return res
+            if res:
+                return res
     return None
 
 def compute_bsc_from_buffs(json_data):
     buff_list = find_contract_buffs_anywhere(json_data)
     total = 0
     breakdown = {k: 0 for k in BSC_WEIGHTS.keys()}
-    if not buff_list: return 0, breakdown
+    if not buff_list:
+        return 0, breakdown
+
     for entry in buff_list:
         try:
             b_id = int(entry.get("buff_id", -1))
-            amt  = int(entry.get("inventory_amount", 0))
+            amt = int(entry.get("inventory_amount", 0))
         except Exception:
             continue
+
         if b_id in BSC_WEIGHTS and amt > 0:
             total += amt * BSC_WEIGHTS[b_id]
             breakdown[b_id] += amt
+
     return total, breakdown
 
 bsc_base, _b = compute_bsc_from_buffs(data)
 
-# Convert current resources into BSC
-bsc_from_gold   = gold            # 1 gold chest = 1 BSC
-bsc_from_silver = silver // 10    # 10 silver = 1 BSC
-bsc_from_gems   = gems // 500     # 500 gems = 1 BSC
+bsc_from_gold = gold
+bsc_from_silver = silver // 10
+bsc_from_gems = gems // 500
 
-# Overall remaining
-R_overall = max(GOAL_BSC - (bsc_base + bsc_from_gold + bsc_from_silver + bsc_from_gems), 0)
+current_total_bsc = bsc_base + bsc_from_gold + bsc_from_silver + bsc_from_gems + event_total_bsc
+R_overall = max(GOAL_BSC - current_total_bsc, 0)
 
-# Per-resource goals in units: overall remaining + add back own contribution
-gold_goal_units   = (R_overall + bsc_from_gold)   * 1
+gold_goal_units = (R_overall + bsc_from_gold) * 1
 silver_goal_units = (R_overall + bsc_from_silver) * 10
-gems_goal_units   = (R_overall + bsc_from_gems)   * 500
+gems_goal_units = (R_overall + bsc_from_gems) * 500
 
-# ========= SAFE ICONS (cache raw PNGs in app dir; crop/resize only in memory) =========
-# Canonical filenames we’ll use *inside the cache*
+# ========= Icons (same as before) =========
 ICON_FILES = {
-    "gems":   "Icon_GemPile2_0_4.png",
-    "bsc":    "Icon_BlacksmithContract1_Inv_0_5.png",
-    "gold":   "Icon_StoreChest_Gold_0_6.png",
+    "gems": "Icon_GemPile2_0_4.png",
+    "bsc": "Icon_BlacksmithContract1_Inv_0_5.png",
+    "gold": "Icon_StoreChest_Gold_0_6.png",
     "silver": "Icon_StoreChest_Silver_0_6.png",
 }
-
-# Exact remote paths to request
 REMOTE_PATHS = {
     "silver": "Icons/Chests/Icon_StoreChest_Silver",
-    "gold":   "Icons/Chests/Icon_StoreChest_Gold",
-    "gems":   "Icons/Inventory/Icon_GemPile2",
-    "bsc":    "Icons/Inventory/Icon_BlacksmithContract1",
+    "gold": "Icons/Chests/Icon_StoreChest_Gold",
+    "gems": "Icons/Inventory/Icon_GemPile2",
+    "bsc": "Icons/Inventory/Icon_BlacksmithContract1",
 }
 
-# Pillow resample compatibility
 try:
     RESAMPLE = Image.Resampling.LANCZOS
 except Exception:
     RESAMPLE = Image.LANCZOS
 
-PNG_SIG  = b"\x89PNG\r\n\x1a\n"
+PNG_SIG = b"\x89PNG\r\n\x1a\n"
 PNG_IEND = b"IEND\xaeB`\x82"
 
-def assets_base_from_api_url(api_url: str) -> str:
-    u = urlparse(api_url)
+def assets_base_from_api_url(api_url_: str) -> str:
+    u = urlparse(api_url_)
+    if not u.scheme or not u.netloc:
+        return ""
     return f"{u.scheme}://{u.netloc}/~idledragons/mobile_assets/"
 
-def maybe_decompress(data: bytes, headers: dict) -> bytes:
+def maybe_decompress(blob: bytes, headers: dict) -> bytes:
     enc = (headers or {}).get("Content-Encoding", "").lower()
-    if enc == "gzip" or (len(data) >= 2 and data[:2] == b"\x1f\x8b"):
+    if enc == "gzip" or (len(blob) >= 2 and blob[:2] == b"\x1f\x8b"):
         try:
-            return gzip.decompress(data)
+            return gzip.decompress(blob)
         except Exception:
             pass
-    return data
+    return blob
 
 def iter_embedded_pngs(blob: bytes):
-    """Yield (start, end, width, height) for each embedded PNG found."""
     i = 0
-    n = len(blob)
     while True:
         start = blob.find(PNG_SIG, i)
         if start == -1:
@@ -501,18 +566,17 @@ def iter_embedded_pngs(blob: bytes):
         width = height = None
         try:
             ihdr_off = start + 8
-            ihdr_len = struct.unpack(">I", blob[ihdr_off:ihdr_off+4])[0]
-            ihdr_tag = blob[ihdr_off+4:ihdr_off+8]
+            ihdr_len = struct.unpack(">I", blob[ihdr_off:ihdr_off + 4])[0]
+            ihdr_tag = blob[ihdr_off + 4:ihdr_off + 8]
             if ihdr_tag == b'IHDR' and ihdr_len >= 8:
-                width  = struct.unpack(">I", blob[ihdr_off+8: ihdr_off+12])[0]
-                height = struct.unpack(">I", blob[ihdr_off+12: ihdr_off+16])[0]
+                width = struct.unpack(">I", blob[ihdr_off + 8: ihdr_off + 12])[0]
+                height = struct.unpack(">I", blob[ihdr_off + 12: ihdr_off + 16])[0]
         except Exception:
             pass
         yield (start, end, width, height)
         i = end
 
 def choose_png_for_key(candidates, key: str):
-    """Pick best embedded PNG by size for each icon type (raw bytes saved; no disk edits)."""
     if not candidates:
         return None
     scored = []
@@ -520,20 +584,21 @@ def choose_png_for_key(candidates, key: str):
         side = max(w or 0, h or 0)
         scored.append((side, w, h, s, e))
     if key in ("gold", "silver"):
-        scored.sort(key=lambda t: (0 if t[0] >= 200 else 1, -t[0]))  # prefer 256-ish chest art
+        scored.sort(key=lambda t: (0 if (t[0] or 0) >= 200 else 1, -(t[0] or 0)))
         return scored[0]
     if key == "bsc":
-        scored.sort(key=lambda t: min(abs((t[0] or 0)-128), abs((t[0] or 0)-64)))  # prefer 128 then 64
+        scored.sort(key=lambda t: min(abs((t[0] or 0) - 128), abs((t[0] or 0) - 64)))
         return scored[0]
     if key == "gems":
-        scored.sort(key=lambda t: abs((t[0] or 0) - 64))  # prefer 64
+        scored.sort(key=lambda t: abs((t[0] or 0) - 64))
         return scored[0]
-    scored.sort(key=lambda t: -t[0])
+    scored.sort(key=lambda t: -(t[0] or 0))
     return scored[0]
 
-def download_and_extract_icon_raw_png(key: str, api_url: str) -> bytes | None:
-    """Download from exact path; return the RAW PNG bytes (no crop/resize when saving)."""
-    base = assets_base_from_api_url(api_url)
+def download_and_extract_icon_raw_png(key: str, api_url_: str):
+    base = assets_base_from_api_url(api_url_)
+    if not base:
+        return None
     path = REMOTE_PATHS[key]
     for suffix in ("", ".png"):
         url = base + path + suffix
@@ -556,60 +621,50 @@ def download_and_extract_icon_raw_png(key: str, api_url: str) -> bytes | None:
             continue
     return None
 
-def ensure_icons_in_cache(api_url: str):
+def ensure_icons_in_cache(api_url_: str):
     ICON_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     for key, local_name in ICON_FILES.items():
         cache_path = ICON_CACHE_DIR / local_name
         if cache_path.exists():
             continue
-        raw = download_and_extract_icon_raw_png(key, api_url)
+        raw = download_and_extract_icon_raw_png(key, api_url_)
         if raw:
             with open(cache_path, "wb") as f:
                 f.write(raw)
-        # If download fails we render without an icon (non-fatal).
 
-def crop_top_left(img: Image.Image, crop_w=165, crop_h=165) -> Image.Image:
-    """Crop top-left area (used for 256x256 chest art to make it fill better)."""
-    w, h = img.size
-    cw = min(crop_w, w)
-    ch = min(crop_h, h)
-    return img.crop((0, 0, cw, ch))
+def crop_top_left(im: Image.Image, crop_w=165, crop_h=165) -> Image.Image:
+    w, h = im.size
+    return im.crop((0, 0, min(crop_w, w), min(crop_h, h)))
 
-def crop_box(img: Image.Image, left: int, top: int, width: int, height: int) -> Image.Image:
-    right = min(left + width, img.size[0])
-    lower = min(top + height, img.size[1])
-    left = max(0, left); top = max(0, top)
-    return img.crop((left, top, right, lower))
+def crop_box(im: Image.Image, left: int, top: int, width: int, height: int) -> Image.Image:
+    right = min(left + width, im.size[0])
+    lower = min(top + height, im.size[1])
+    left = max(0, left)
+    top = max(0, top)
+    return im.crop((left, top, right, lower))
 
 def load_icon_processed_from_cache(key: str, size=ICON_SIZE):
-    """Open cached RAW PNG (no disk edits), crop/resize only in memory for rendering."""
     cache_path = ICON_CACHE_DIR / ICON_FILES[key]
     if not cache_path.exists():
         return None
     try:
-        img = Image.open(str(cache_path)).convert("RGBA")
-        w, h = img.size
-        if key in ("gold", "silver"):
-            if max(w, h) >= 200:
-                img = crop_top_left(img, 165, 165)
-        elif key == "bsc":
-            if (w, h) == (128, 128):
-                img = crop_box(img, 4, 4, 64, 64)
-        # gems likely 64x64 → no crop
-        return img.resize(size, RESAMPLE)
+        im = Image.open(str(cache_path)).convert("RGBA")
+        w, h = im.size
+        if key in ("gold", "silver") and max(w, h) >= 200:
+            im = crop_top_left(im, 165, 165)
+        elif key == "bsc" and (w, h) == (128, 128):
+            im = crop_box(im, 4, 4, 64, 64)
+        return im.resize(size, RESAMPLE)
     except Exception:
         return None
 
-# 1) Ensure raw PNGs exist in our cache (next to script/exe)
 ensure_icons_in_cache(api_url)
-
-# 2) Load for drawing (crop/resize only in memory)
-icon_gems   = load_icon_processed_from_cache("gems")
-icon_bsc    = load_icon_processed_from_cache("bsc")
-icon_gold   = load_icon_processed_from_cache("gold")
+icon_gems = load_icon_processed_from_cache("gems")
+icon_bsc = load_icon_processed_from_cache("bsc")
+icon_gold = load_icon_processed_from_cache("gold")
 icon_silver = load_icon_processed_from_cache("silver")
 
-# ========= Draw =========
+# ========= Draw (rounded & clipped) =========
 def _load_font(path, size):
     try:
         if path and os.path.exists(path):
@@ -623,111 +678,154 @@ def _load_font(path, size):
         pass
     return _IF.load_default()
 
-img_h = PADDING*2 + 4*ROW_HEIGHT + 40
-img = Image.new("RGBA", (IMG_WIDTH, img_h), (0,0,0,0))
-draw = ImageDraw.Draw(img)
-
-font_med   = _load_font(FONT_MED_PATH, 21)
+font_med = _load_font(FONT_MED_PATH, 21)
 font_small = _load_font(FONT_SMALL_PATH, 15)
+
+def _bar_masks(size_xy, bar_rect, radius, fill_w):
+    bg = Image.new("L", size_xy, 0)
+    ImageDraw.Draw(bg).rounded_rectangle(bar_rect, radius=radius, fill=255)
+    fill = Image.new("L", size_xy, 0)
+    if fill_w > 0:
+        x1, y1, x2, y2 = bar_rect
+        ImageDraw.Draw(fill).rectangle((x1, y1, x1 + fill_w, y2), fill=255)
+    return bg, fill
+
+def draw_rounded_progress(img, draw, bar_rect, frac, fill_color,
+                          bg_color=(40, 40, 40, 200), outline=BAR_OUTLINE, outline_w=1, radius=10):
+    x1, y1, x2, y2 = bar_rect
+    w = max(0, int(x2 - x1))
+    fill_w = int(round(w * max(0.0, min(1.0, frac))))
+
+    draw.rounded_rectangle(bar_rect, radius=radius, fill=bg_color, outline=outline, width=outline_w)
+    if fill_w <= 0:
+        return
+
+    bg_mask, fill_mask = _bar_masks(img.size, bar_rect, radius, fill_w)
+    clip_mask = ImageChops.multiply(bg_mask, fill_mask)
+
+    fill_layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    ImageDraw.Draw(fill_layer).rounded_rectangle(bar_rect, radius=radius, fill=fill_color)
+    img.paste(fill_layer, (0, 0), clip_mask)
+
+def draw_progress_block(y, value, goal, icon, bar_color, title="", meta_suffix=""):
+    bar_x = PADDING + (ICON_SIZE[0] + 10 if icon else 0)
+    if icon:
+        img.paste(icon, (PADDING, y + (ROW_HEIGHT - ICON_SIZE[1]) // 2), icon)
+
+    draw.text((bar_x, y), title, font=font_med, fill=(255, 255, 255))
+    pct = percent_str(value, goal)
+    w = draw.textlength(pct, font=font_small)
+    draw.text((bar_x + BAR_WIDTH - w, y), pct, font=font_small, fill=(220, 220, 220))
+
+    title_h = (draw.textbbox((0, 0), title, font=font_med)[3] -
+               draw.textbbox((0, 0), title, font=font_med)[1])
+    bar_y = y + title_h + TITLE_BAR_GAP
+
+    frac = 0.0 if goal <= 0 else min(float(value) / float(goal), 1.0)
+    bar_rect = (bar_x, bar_y, bar_x + BAR_WIDTH, bar_y + BAR_HEIGHT)
+    draw_rounded_progress(img, draw, bar_rect, frac, bar_color, radius=10)
+
+    remaining_units = max(int(goal) - int(value), 0)
+    meta = f"Remaining: {fmt_int(remaining_units)} • Goal: {fmt_int(goal)}{meta_suffix}"
+    draw.text((bar_x, bar_y + BAR_HEIGHT + 4), meta, font=font_small, fill=(210, 210, 210))
+
+def draw_stacked_bsc_block(y, segments, goal, title, icon=None):
+    bar_x = PADDING + (ICON_SIZE[0] + 10 if icon else 0)
+    if icon:
+        img.paste(icon, (PADDING, y + (ROW_HEIGHT - ICON_SIZE[1]) // 2), icon)
+
+    draw.text((bar_x, y), title, font=font_med, fill=(255, 255, 255))
+    total_bsc = sum(v for _, v, _ in segments)
+    pct = percent_str(total_bsc, goal)
+    w = draw.textlength(pct, font=font_small)
+    draw.text((bar_x + BAR_WIDTH - w, y), pct, font=font_small, fill=(220, 220, 220))
+
+    title_h = (draw.textbbox((0, 0), title, font=font_med)[3] -
+               draw.textbbox((0, 0), title, font=font_med)[1])
+    bar_y = y + title_h + TITLE_BAR_GAP
+    bar_rect = (bar_x, bar_y, bar_x + BAR_WIDTH, bar_y + BAR_HEIGHT)
+
+    draw.rounded_rectangle(bar_rect, radius=10, fill=(40, 40, 40, 200), outline=BAR_OUTLINE, width=1)
+
+    bg_mask = Image.new("L", img.size, 0)
+    ImageDraw.Draw(bg_mask).rounded_rectangle(bar_rect, radius=10, fill=255)
+
+    used_px = 0
+    for _, val, color in segments:
+        if goal <= 0 or val <= 0:
+            continue
+        seg_w = int(round(BAR_WIDTH * (float(val) / float(goal))))
+        if seg_w <= 0:
+            continue
+        seg_w = min(seg_w, BAR_WIDTH - used_px)
+        if seg_w <= 0:
+            break
+
+        seg_mask = Image.new("L", img.size, 0)
+        x1, y1, x2, y2 = bar_rect
+        ImageDraw.Draw(seg_mask).rectangle((x1 + used_px, y1, x1 + used_px + seg_w, y2), fill=255)
+        clip = ImageChops.multiply(bg_mask, seg_mask)
+
+        seg_layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        ImageDraw.Draw(seg_layer).rectangle((x1 + used_px, y1, x1 + used_px + seg_w, y2), fill=color)
+        img.paste(seg_layer, (0, 0), clip)
+
+        used_px += seg_w
+        if used_px >= BAR_WIDTH:
+            break
+
+    # ===== Legend with colored squares (constrained to BAR_WIDTH) =====
+    legend_y = bar_y + BAR_HEIGHT + LEGEND_GAP
+    lx = bar_x
+    x_limit = bar_x + BAR_WIDTH  # <<< key change: do NOT use IMG_WIDTH
+    box = 10
+    gap = 4
+    pad_after = 16
+
+    for (name, val, col) in segments:
+        label = f"{name} {fmt_int(val)}"
+        tw = draw.textbbox((0, 0), label, font=font_small)[2]
+        item_w = box + gap + tw + pad_after
+
+        if lx + item_w > x_limit:
+            lx = bar_x
+            legend_y += 18
+
+        draw.rectangle((lx, legend_y + 4, lx + box, legend_y + 4 + box), fill=col)
+        draw.text((lx + box + gap, legend_y), label, font=font_small, fill=(210, 210, 210))
+        lx += item_w
+
+    remaining = max(int(goal) - int(total_bsc), 0)
+    meta_y = legend_y + 18
+    meta = f"Remaining: {fmt_int(remaining)} • Goal: {fmt_int(goal)}"
+    draw.text((bar_x, meta_y), meta, font=font_small, fill=(200, 200, 200))
+
+# --- compose image (height for wrapped legend; width unchanged) ---
+img_h = PADDING * 2 + 4 * ROW_HEIGHT + 100
+img = Image.new("RGBA", (IMG_WIDTH, img_h), (0, 0, 0, 0))
+draw = ImageDraw.Draw(img)
 
 now = datetime.now()
 date_str = f"{now.day} {MONTHS_EN[now.month]} {now.year}"
 draw.text((PADDING, 6), date_str, font=font_small, fill=(180, 180, 180))
 
-def draw_progress_block(y, value, goal, icon, bar_color, title="", meta_suffix=""):
-    bar_x = PADDING + (ICON_SIZE[0] + 10 if icon else 0)
-    title_y = y
-    title_h = 0
-    if title:
-        bbox = draw.textbbox((0, 0), title, font=font_med)
-        title_h = bbox[3] - bbox[1]
-    bar_y = y + title_h + TITLE_BAR_GAP
-
-    draw.rectangle([bar_x, bar_y, bar_x + BAR_WIDTH, bar_y + BAR_HEIGHT], fill=(40, 40, 40))
-    draw.rectangle([bar_x, bar_y, bar_x + BAR_WIDTH - 1, bar_y + BAR_HEIGHT - 1], outline=BAR_OUTLINE, width=1)
-
-    frac = 0 if goal <= 0 else min(value / goal, 1.0)
-    fill_w = int(BAR_WIDTH * frac)
-    if fill_w > 0:
-        draw.rectangle([bar_x, bar_y, bar_x + fill_w, bar_y + BAR_HEIGHT], fill=bar_color)
-
-    if icon:
-        img.paste(icon, (PADDING, y + (ROW_HEIGHT - ICON_SIZE[1]) // 2), icon)
-
-    if title:
-        draw.text((bar_x, title_y), title, font=font_med, fill=(255, 255, 255))
-    pct = percent_str(value, goal)
-    w = draw.textlength(pct, font=font_small)
-    draw.text((bar_x + BAR_WIDTH - w, title_y), pct, font=font_small, fill=(220, 220, 220))
-
-    remaining_units = max(goal - value, 0)
-    meta = f"Remaining: {fmt_int(remaining_units)} • Goal: {fmt_int(goal)}{meta_suffix}"
-    draw.text((bar_x, bar_y + BAR_HEIGHT + 4), meta, font=font_small, fill=(210,210,210))
-
-def draw_stacked_bsc_block(y, segments, goal, title, icon=None):
-    bar_x = PADDING + (ICON_SIZE[0] + 10 if icon else 0)
-    title_y = y
-    title_h = 0
-    if title:
-        bbox = draw.textbbox((0, 0), title, font=font_med)
-        title_h = bbox[3] - bbox[1]
-    bar_y = y + title_h + TITLE_BAR_GAP
-    bar_w, bar_h = BAR_WIDTH, BAR_HEIGHT
-
-    draw.rectangle([bar_x, bar_y, bar_x + bar_w, bar_y + bar_h], fill=(40,40,40))
-    draw.rectangle([bar_x, bar_y, bar_x + bar_w - 1, bar_y + bar_h - 1], outline=BAR_OUTLINE, width=1)
-
-    used_px = 0
-    total_bsc = sum(v for _, v, _ in segments)
-    for _, val, color in segments:
-        if goal <= 0 or val <= 0:
-            continue
-        remaining_px = bar_w - used_px
-        seg_w = int(round(bar_w * (val / goal)))
-        if seg_w > remaining_px: seg_w = remaining_px
-        if seg_w <= 0 and remaining_px > 0: seg_w = 1
-        draw.rectangle([bar_x + used_px, bar_y, bar_x + used_px + seg_w, bar_y + bar_h], fill=color)
-        used_px += seg_w
-        if SHOW_SEG_SEPARATORS and used_px < bar_w:
-            draw.line([(bar_x + used_px, bar_y), (bar_x + used_px, bar_y + bar_h)], fill=SEGMENT_SEPARATOR, width=1)
-        if used_px >= bar_w:
-            break
-
-    if icon:
-        img.paste(icon, (PADDING, y + (ROW_HEIGHT - ICON_SIZE[1]) // 2), icon)
-
-    if title:
-        draw.text((bar_x, title_y), title, font=font_med, fill=(255,255,255))
-    pct = percent_str(total_bsc, goal)
-    w = draw.textlength(pct, font=font_small)
-    draw.text((bar_x + bar_w - w, title_y), pct, font=font_small, fill=(220,220,220))
-
-    labels = [f"{lbl} {fmt_int(val)}" for lbl, val, _ in segments]
-    legend = " | ".join(labels)
-    draw.text((bar_x, bar_y + bar_h + LEGEND_GAP), legend, font=font_small, fill=(210,210,210))
-
-    remaining = max(goal - total_bsc, 0)
-    meta = f"Remaining: {fmt_int(remaining)} • Goal: {fmt_int(goal)}"
-    draw.text((bar_x, bar_y + bar_h + LEGEND_GAP + 18), meta, font=font_small, fill=(200,200,200))
-
-# Segments (BSC units)
 segments = [
-    ("BSC",   bsc_base,        COLOR_BSC_BASE),
-    ("Gold",  bsc_from_gold,   COLOR_GOLD),
-    ("Silver",bsc_from_silver, COLOR_SILVER),
-    ("Gems",  bsc_from_gems,   COLOR_GEMS),
+    ("BSC", bsc_base, COLOR_BSC_BASE),
+    ("Gold", bsc_from_gold, COLOR_GOLD),
+    ("Silver", bsc_from_silver, COLOR_SILVER),
+    ("Gems", bsc_from_gems, COLOR_GEMS),
 ]
+if EVENT_ENABLE and event_total_bsc > 0:
+    segments.append((EVENT_NAME, event_total_bsc, COLOR_EVENT))
 
-# Draw
 y0 = 26
-draw_progress_block(y0 + 0*ROW_HEIGHT, gold,   gold_goal_units,   icon_gold,   COLOR_GOLD,
-                    title="Gold-Chests",   meta_suffix=" (1 ≈ 1 BSC)")
-draw_progress_block(y0 + 1*ROW_HEIGHT, silver, silver_goal_units, icon_silver, COLOR_SILVER,
+draw_progress_block(y0 + 0 * ROW_HEIGHT, gold, gold_goal_units, icon_gold, COLOR_GOLD,
+                    title="Gold-Chests", meta_suffix=" (1 ≈ 1 BSC)")
+draw_progress_block(y0 + 1 * ROW_HEIGHT, silver, silver_goal_units, icon_silver, COLOR_SILVER,
                     title="Silver-Chests", meta_suffix=" (10 ≈ 1 BSC)")
-draw_progress_block(y0 + 2*ROW_HEIGHT, gems,   gems_goal_units,   icon_gems,   COLOR_GEMS,
-                    title="Gems",          meta_suffix=" (500 = 1 BSC)")
-draw_stacked_bsc_block(y0 + 3*ROW_HEIGHT, segments, GOAL_BSC, "Blacksmith Contracts", icon=icon_bsc)
+draw_progress_block(y0 + 2 * ROW_HEIGHT, gems, gems_goal_units, icon_gems, COLOR_GEMS,
+                    title="Gems", meta_suffix=" (500 = 1 BSC)")
+draw_stacked_bsc_block(y0 + 3 * ROW_HEIGHT, segments, GOAL_BSC, "Blacksmith Contracts", icon=icon_bsc)
 
-# Save
 img.save(OUTPUT_PATH)
 print(f"✅ Overlay saved as {OUTPUT_PATH}")
