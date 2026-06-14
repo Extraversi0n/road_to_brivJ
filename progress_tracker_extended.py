@@ -18,7 +18,6 @@ from typing import Optional
 
 from PIL import Image, ImageDraw, ImageFont as _IF, ImageChops
 
-
 # ========= Working dir (EXE/script) =========
 def _set_cwd_to_app_dir():
     try:
@@ -31,7 +30,7 @@ def _set_cwd_to_app_dir():
 _set_cwd_to_app_dir()
 APP_DIR = Path.cwd()
 ICON_CACHE_DIR = APP_DIR / "overlay_icon_cache"
-
+SNAPSHOT_FILE = "bsc_snapshot.json"
 
 # ========= Locale formatting =========
 try:
@@ -47,6 +46,15 @@ def fmt_int(n: int) -> str:
         return f"{int(n)}"
 
 
+def fmt_float(n: float, digits: int = 1) -> str:
+    try:
+        s = f"{float(n):.{digits}f}"
+        dec = locale.localeconv().get("decimal_point", ".") or "."
+        return s.replace(".", dec)
+    except Exception:
+        return f"{float(n):.{digits}f}"
+
+
 PERCENT_STYLE = "locale"
 
 
@@ -59,7 +67,7 @@ def percent_str(value, goal, style=None):
     if style == "locale":
         dec = locale.localeconv().get("decimal_point", ".") or "."
         s = s.replace(".", dec)
-    else:  # dot
+    else:
         s = s.replace(",", ".")
     return s + "%"
 
@@ -98,9 +106,6 @@ MOBILE_CLIENT_VERSION = "9999"
 
 # ========= Event chest averages =========
 EVENT_SILVER_ILVL_AVG = 2.10887097
-# Gold average alternatives:
-# - Gear + BSC only (without BC Tokens): 13.70210250
-# - Gear + BSC + BC Tokens:             14.41267674
 EVENT_GOLD_ILVL_AVG_NO_BC = 13.70210250
 EVENT_GOLD_ILVL_AVG_WITH_BC = 14.41267674
 
@@ -124,6 +129,13 @@ def parse_cli_args():
     p.add_argument("--event-gold-id", type=int)
     p.add_argument("--event-no-bc-tokens", action="store_true",
                    help="use Gear + BSC only (without BC Tokens) for event gold chest average")
+
+    # ETA overrides
+    p.add_argument("--eta-enable", action="store_true")
+    p.add_argument("--eta-bsc-per-hour", type=float)
+    p.add_argument("--eta-use-snapshot", action="store_true")
+    p.add_argument("--save-snapshot", action="store_true")
+
     return p.parse_args()
 
 
@@ -144,6 +156,25 @@ def load_config():
 def save_config(cfg: dict):
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
+
+
+def load_snapshot():
+    try:
+        if os.path.exists(SNAPSHOT_FILE):
+            with open(SNAPSHOT_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+
+def save_snapshot(total_bsc: int):
+    payload = {
+        "timestamp": datetime.now().isoformat(),
+        "total_bsc": int(total_bsc),
+    }
+    with open(SNAPSHOT_FILE, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
 
 
 # ========= Log parsing =========
@@ -188,6 +219,16 @@ def safe_int(v, default=0):
             return default
 
 
+def safe_float(v, default=0.0):
+    try:
+        return float(v)
+    except Exception:
+        try:
+            return float(str(v).replace(",", "."))
+        except Exception:
+            return default
+
+
 def get_nested(d, path, default=None):
     cur = d
     for part in path.split("."):
@@ -224,7 +265,7 @@ def show_config_dialog(defaults: dict):
     v_goal = tk.StringVar(value=str(defaults.get("goal_bsc", GOAL_BSC)))
     v_api = tk.StringVar(value=defaults.get("api_url_override", ""))
 
-    # save creds logic
+    # creds
     save_creds_prev = bool(defaults.get("save_creds", False))
     v_save_creds = tk.BooleanVar(value=save_creds_prev)
     v_user = tk.StringVar(value=(defaults.get("user_id_override", "") if save_creds_prev else ""))
@@ -237,6 +278,12 @@ def show_config_dialog(defaults: dict):
     v_event_silver = tk.StringVar(value=str(defaults.get("event_silver_id", 174)))
     v_event_gold = tk.StringVar(value=str(defaults.get("event_gold_id", 175)))
     v_event_no_bc_tokens = tk.BooleanVar(value=bool(defaults.get("event_no_bc_tokens", True)))
+
+    # ETA
+    v_eta_enable = tk.BooleanVar(value=bool(defaults.get("eta_enable", False)))
+    v_eta_bsc_per_hour = tk.StringVar(value=str(defaults.get("eta_bsc_per_hour", "")))
+    v_eta_use_snapshot = tk.BooleanVar(value=bool(defaults.get("eta_use_snapshot", False)))
+    v_save_snapshot_on_run = tk.BooleanVar(value=False)
 
     out_cfg = {}
 
@@ -309,17 +356,28 @@ def show_config_dialog(defaults: dict):
             "goal_bsc": safe_int_field(v_goal.get(), GOAL_BSC),
             "api_url_override": v_api.get().strip(),
 
+            # event
             "event_enable": bool(v_event_enable.get()),
             "event_name": (v_event_name.get().strip() or "Briv"),
             "event_silver_id": safe_int_field(v_event_silver.get(), 174),
             "event_gold_id": safe_int_field(v_event_gold.get(), 175),
             "event_no_bc_tokens": bool(v_event_no_bc_tokens.get()),
 
+            # eta
+            "eta_enable": bool(v_eta_enable.get()),
+            "eta_bsc_per_hour": v_eta_bsc_per_hour.get().strip(),
+            "eta_use_snapshot": bool(v_eta_use_snapshot.get()),
+            "save_snapshot_on_run": bool(v_save_snapshot_on_run.get()),
+
+            # creds
             "user_id_override": v_user.get().strip(),
             "hash_override": v_hash.get().strip(),
         }
 
         to_save = dict(run_cfg)
+        # don't persist one-shot action
+        to_save.pop("save_snapshot_on_run", None)
+
         if v_save_creds.get():
             to_save["save_creds"] = True
         else:
@@ -397,6 +455,29 @@ def show_config_dialog(defaults: dict):
     ).grid(row=r, column=0, columnspan=3, sticky="w", padx=8, pady=(4, 4))
 
     r += 1
+    tk.Label(root, text="— ETA / Days remaining —").grid(
+        row=r, column=0, columnspan=3, sticky="w", padx=8, pady=(14, 4)
+    )
+
+    r += 1
+    tk.Checkbutton(root, text="Enable ETA", variable=v_eta_enable).grid(
+        row=r, column=0, columnspan=3, sticky="w", padx=8, pady=4
+    )
+
+    r += 1
+    row_label("Manual BSC/h", r); row_entry(v_eta_bsc_per_hour, r, width=20)
+
+    r += 1
+    tk.Checkbutton(root, text="Use snapshot-derived BSC/h", variable=v_eta_use_snapshot).grid(
+        row=r, column=0, columnspan=3, sticky="w", padx=8, pady=4
+    )
+
+    r += 1
+    tk.Checkbutton(root, text="Save snapshot on this run", variable=v_save_snapshot_on_run).grid(
+        row=r, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 8)
+    )
+
+    r += 1
     tk.Button(root, text="Save & Run", command=on_save_run).grid(row=r, column=1, padx=8, pady=12, sticky="e")
     tk.Button(root, text="Cancel", command=on_cancel).grid(row=r, column=2, padx=8, pady=12, sticky="w")
 
@@ -437,6 +518,14 @@ if _args.headless:
     if _args.event_no_bc_tokens:
         _cfg["event_no_bc_tokens"] = True
 
+    if _args.eta_enable:
+        _cfg["eta_enable"] = True
+    if _args.eta_bsc_per_hour is not None:
+        _cfg["eta_bsc_per_hour"] = str(_args.eta_bsc_per_hour)
+    if _args.eta_use_snapshot:
+        _cfg["eta_use_snapshot"] = True
+    _cfg["save_snapshot_on_run"] = bool(_args.save_snapshot)
+
     _cfg.setdefault("log_path", LOG_PATH)
     _cfg.setdefault("output_path", OUTPUT_PATH)
     _cfg.setdefault("goal_bsc", GOAL_BSC)
@@ -457,8 +546,12 @@ EVENT_NAME = (_cfg.get("event_name") or "Briv").strip() or "Briv"
 EVENT_SILVER_ID = str(_cfg.get("event_silver_id", 174))
 EVENT_GOLD_ID = str(_cfg.get("event_gold_id", 175))
 EVENT_NO_BC_TOKENS = bool(_cfg.get("event_no_bc_tokens", True))
-
 EVENT_GOLD_ILVL_AVG = EVENT_GOLD_ILVL_AVG_NO_BC if EVENT_NO_BC_TOKENS else EVENT_GOLD_ILVL_AVG_WITH_BC
+
+ETA_ENABLE = bool(_cfg.get("eta_enable", False))
+ETA_BSC_PER_HOUR_MANUAL = safe_float(_cfg.get("eta_bsc_per_hour", 0.0), 0.0)
+ETA_USE_SNAPSHOT = bool(_cfg.get("eta_use_snapshot", False))
+SAVE_SNAPSHOT_ON_RUN = bool(_cfg.get("save_snapshot_on_run", False))
 
 
 # ========= Read log & build API call =========
@@ -525,6 +618,7 @@ event_total_bsc = int(round(
 # Base BSC from buffs
 BSC_WEIGHTS = {31: 1, 32: 2, 33: 6, 34: 24, 1797: 120}
 
+
 def find_contract_buffs_anywhere(obj):
     if isinstance(obj, list):
         if obj and isinstance(obj[0], dict) and 'buff_id' in obj[0] and 'inventory_amount' in obj[0]:
@@ -539,6 +633,7 @@ def find_contract_buffs_anywhere(obj):
             if res:
                 return res
     return None
+
 
 def compute_bsc_from_buffs(json_data):
     buff_list = find_contract_buffs_anywhere(json_data)
@@ -557,6 +652,7 @@ def compute_bsc_from_buffs(json_data):
             breakdown[b_id] += amt
     return total, breakdown
 
+
 bsc_base, _b = compute_bsc_from_buffs(data)
 
 bsc_from_gold = gold
@@ -569,6 +665,45 @@ R_overall = max(GOAL_BSC - current_total_bsc, 0)
 gold_goal_units = (R_overall + bsc_from_gold) * 1
 silver_goal_units = (R_overall + bsc_from_silver) * 10
 gems_goal_units = (R_overall + bsc_from_gems) * 500
+
+
+# ========= ETA / snapshot =========
+eta_bsc_per_hour = 0.0
+eta_source = None
+eta_text = None
+
+if ETA_ENABLE:
+    if ETA_USE_SNAPSHOT:
+        snap = load_snapshot()
+        snap_total = safe_int(snap.get("total_bsc", 0), 0)
+        snap_ts_raw = snap.get("timestamp")
+        try:
+            snap_dt = datetime.fromisoformat(snap_ts_raw) if snap_ts_raw else None
+        except Exception:
+            snap_dt = None
+
+        if snap_dt is not None:
+            elapsed_hours = (datetime.now() - snap_dt).total_seconds() / 3600.0
+            delta_bsc = current_total_bsc - snap_total
+            if elapsed_hours > 0 and delta_bsc > 0:
+                eta_bsc_per_hour = delta_bsc / elapsed_hours
+                eta_source = "snapshot"
+
+    if eta_bsc_per_hour <= 0 and ETA_BSC_PER_HOUR_MANUAL > 0:
+        eta_bsc_per_hour = ETA_BSC_PER_HOUR_MANUAL
+        eta_source = "manual"
+
+    if eta_bsc_per_hour > 0:
+        eta_hours = R_overall / eta_bsc_per_hour if R_overall > 0 else 0.0
+        eta_days = eta_hours / 24.0
+        eta_text = f"ETA @ {fmt_float(eta_bsc_per_hour, 1)} BSC/h ({eta_source}): {fmt_float(eta_days, 1)} days"
+
+if SAVE_SNAPSHOT_ON_RUN:
+    try:
+        save_snapshot(current_total_bsc)
+    except Exception:
+        pass
+
 
 # ========= Icons =========
 ICON_FILES = {
@@ -592,11 +727,13 @@ except Exception:
 PNG_SIG = b"\x89PNG\r\n\x1a\n"
 PNG_IEND = b"IEND\xaeB`\x82"
 
+
 def assets_base_from_api_url(api_url_: str) -> str:
     u = urlparse(api_url_)
     if not u.scheme or not u.netloc:
         return ""
     return f"{u.scheme}://{u.netloc}/~idledragons/mobile_assets/"
+
 
 def maybe_decompress(blob: bytes, headers: dict) -> bytes:
     enc = (headers or {}).get("Content-Encoding", "").lower()
@@ -606,6 +743,7 @@ def maybe_decompress(blob: bytes, headers: dict) -> bytes:
         except Exception:
             pass
     return blob
+
 
 def iter_embedded_pngs(blob: bytes):
     i = 0
@@ -630,6 +768,7 @@ def iter_embedded_pngs(blob: bytes):
         yield (start, end, width, height)
         i = end
 
+
 def choose_png_for_key(candidates, key: str):
     if not candidates:
         return None
@@ -648,6 +787,7 @@ def choose_png_for_key(candidates, key: str):
         return scored[0]
     scored.sort(key=lambda t: -(t[0] or 0))
     return scored[0]
+
 
 def download_and_extract_icon_raw_png(key: str, api_url_: str):
     base = assets_base_from_api_url(api_url_)
@@ -675,6 +815,7 @@ def download_and_extract_icon_raw_png(key: str, api_url_: str):
             continue
     return None
 
+
 def ensure_icons_in_cache(api_url_: str):
     ICON_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     for key, local_name in ICON_FILES.items():
@@ -686,9 +827,11 @@ def ensure_icons_in_cache(api_url_: str):
             with open(cache_path, "wb") as f:
                 f.write(raw)
 
+
 def crop_top_left(im: Image.Image, crop_w=165, crop_h=165) -> Image.Image:
     w, h = im.size
     return im.crop((0, 0, min(crop_w, w), min(crop_h, h)))
+
 
 def crop_box(im: Image.Image, left: int, top: int, width: int, height: int) -> Image.Image:
     right = min(left + width, im.size[0])
@@ -696,6 +839,7 @@ def crop_box(im: Image.Image, left: int, top: int, width: int, height: int) -> I
     left = max(0, left)
     top = max(0, top)
     return im.crop((left, top, right, lower))
+
 
 def load_icon_processed_from_cache(key: str, size=ICON_SIZE):
     cache_path = ICON_CACHE_DIR / ICON_FILES[key]
@@ -712,11 +856,13 @@ def load_icon_processed_from_cache(key: str, size=ICON_SIZE):
     except Exception:
         return None
 
+
 ensure_icons_in_cache(api_url)
 icon_gems = load_icon_processed_from_cache("gems")
 icon_bsc = load_icon_processed_from_cache("bsc")
 icon_gold = load_icon_processed_from_cache("gold")
 icon_silver = load_icon_processed_from_cache("silver")
+
 
 # ========= Draw =========
 def _load_font(path, size):
@@ -732,8 +878,10 @@ def _load_font(path, size):
         pass
     return _IF.load_default()
 
+
 font_med = _load_font(FONT_MED_PATH, 21)
 font_small = _load_font(FONT_SMALL_PATH, 15)
+
 
 def _bar_masks(size_xy, bar_rect, radius, fill_w):
     bg = Image.new("L", size_xy, 0)
@@ -743,6 +891,7 @@ def _bar_masks(size_xy, bar_rect, radius, fill_w):
         x1, y1, x2, y2 = bar_rect
         ImageDraw.Draw(fill).rectangle((x1, y1, x1 + fill_w, y2), fill=255)
     return bg, fill
+
 
 def draw_rounded_progress(img, draw, bar_rect, frac, fill_color,
                           bg_color=(40, 40, 40, 200), outline=BAR_OUTLINE, outline_w=1, radius=10):
@@ -760,6 +909,7 @@ def draw_rounded_progress(img, draw, bar_rect, frac, fill_color,
     fill_layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
     ImageDraw.Draw(fill_layer).rounded_rectangle(bar_rect, radius=radius, fill=fill_color)
     img.paste(fill_layer, (0, 0), clip_mask)
+
 
 def draw_progress_block(y, value, goal, icon, bar_color, title="", meta_suffix=""):
     bar_x = PADDING + (ICON_SIZE[0] + 10 if icon else 0)
@@ -783,7 +933,8 @@ def draw_progress_block(y, value, goal, icon, bar_color, title="", meta_suffix="
     meta = f"Remaining: {fmt_int(remaining_units)} • Goal: {fmt_int(goal)}{meta_suffix}"
     draw.text((bar_x, bar_y + BAR_HEIGHT + 4), meta, font=font_small, fill=(210, 210, 210))
 
-def draw_stacked_bsc_block(y, segments, goal, title, icon=None):
+
+def draw_stacked_bsc_block(y, segments, goal, title, icon=None, eta_text=None):
     bar_x = PADDING + (ICON_SIZE[0] + 10 if icon else 0)
     if icon:
         img.paste(icon, (PADDING, y + (ROW_HEIGHT - ICON_SIZE[1]) // 2), icon)
@@ -855,8 +1006,13 @@ def draw_stacked_bsc_block(y, segments, goal, title, icon=None):
     meta = f"Remaining: {fmt_int(remaining)} • Goal: {fmt_int(goal)}"
     draw.text((bar_x, meta_y), meta, font=font_small, fill=(200, 200, 200))
 
+    if eta_text:
+        draw.text((bar_x, meta_y + 18), eta_text, font=font_small, fill=(200, 200, 200))
+
+
 # --- compose image ---
-img_h = PADDING * 2 + 4 * ROW_HEIGHT + 100
+extra_bottom = 120 if ETA_ENABLE else 100
+img_h = PADDING * 2 + 4 * ROW_HEIGHT + extra_bottom
 img = Image.new("RGBA", (IMG_WIDTH, img_h), (0, 0, 0, 0))
 draw = ImageDraw.Draw(img)
 
@@ -880,7 +1036,7 @@ draw_progress_block(y0 + 1 * ROW_HEIGHT, silver, silver_goal_units, icon_silver,
                     title="Silver-Chests", meta_suffix=" (10 ≈ 1 BSC)")
 draw_progress_block(y0 + 2 * ROW_HEIGHT, gems, gems_goal_units, icon_gems, COLOR_GEMS,
                     title="Gems", meta_suffix=" (500 = 1 BSC)")
-draw_stacked_bsc_block(y0 + 3 * ROW_HEIGHT, segments, GOAL_BSC, "Blacksmith Contracts", icon=icon_bsc)
+draw_stacked_bsc_block(y0 + 3 * ROW_HEIGHT, segments, GOAL_BSC, "Blacksmith Contracts", icon=icon_bsc, eta_text=eta_text)
 
 img.save(OUTPUT_PATH)
 print(f"✅ Overlay saved as {OUTPUT_PATH}")

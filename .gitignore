@@ -26,3 +26,6 @@ Thumbs.db
 
 # Overlay runtime cache
 overlay_icon_cache/
+
+# ETA
+bsc_snapshot.json
