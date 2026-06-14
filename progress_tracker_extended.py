@@ -14,9 +14,10 @@ import certifi
 from pathlib import Path
 from urllib.parse import urlparse, parse_qsl
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Dict, Any
 
 from PIL import Image, ImageDraw, ImageFont as _IF, ImageChops
+
 
 # ========= Working dir (EXE/script) =========
 def _set_cwd_to_app_dir():
@@ -31,6 +32,7 @@ _set_cwd_to_app_dir()
 APP_DIR = Path.cwd()
 ICON_CACHE_DIR = APP_DIR / "overlay_icon_cache"
 SNAPSHOT_FILE = "bsc_snapshot.json"
+
 
 # ========= Locale formatting =========
 try:
@@ -109,6 +111,10 @@ EVENT_SILVER_ILVL_AVG = 2.10887097
 EVENT_GOLD_ILVL_AVG_NO_BC = 13.70210250
 EVENT_GOLD_ILVL_AVG_WITH_BC = 14.41267674
 
+# ========= Snapshot settings =========
+MIN_SNAPSHOT_MINUTES = 1.0
+MAX_SNAPSHOTS = 500
+
 
 # ========= CLI =========
 def parse_cli_args():
@@ -117,8 +123,8 @@ def parse_cli_args():
     p.add_argument("--log-path")
     p.add_argument("--output")
     p.add_argument("--goal-bsc", type=int)
-    p.add_argument("--user-id")   # override only
-    p.add_argument("--hash")      # override only
+    p.add_argument("--user-id")
+    p.add_argument("--hash")
     p.add_argument("--api-url")
     p.add_argument("--percent-style", choices=["locale", "dot", "int"])
 
@@ -127,14 +133,14 @@ def parse_cli_args():
     p.add_argument("--event-name")
     p.add_argument("--event-silver-id", type=int)
     p.add_argument("--event-gold-id", type=int)
-    p.add_argument("--event-no-bc-tokens", action="store_true",
-                   help="use Gear + BSC only (without BC Tokens) for event gold chest average")
+    p.add_argument("--event-no-bc-tokens", action="store_true")
 
-    # ETA overrides
+    # ETA / snapshot overrides
     p.add_argument("--eta-enable", action="store_true")
     p.add_argument("--eta-bsc-per-hour", type=float)
     p.add_argument("--eta-use-snapshot", action="store_true")
     p.add_argument("--save-snapshot", action="store_true")
+    p.add_argument("--reset-snapshots", action="store_true")
 
     return p.parse_args()
 
@@ -158,23 +164,262 @@ def save_config(cfg: dict):
         json.dump(cfg, f, ensure_ascii=False, indent=2)
 
 
-def load_snapshot():
+# ========= Snapshot history =========
+def load_snapshot_history() -> Dict[str, Any]:
+    """
+    New format:
+    {
+      "entries": [
+        {"timestamp": "...", "total_bsc": 123},
+        ...
+      ]
+    }
+
+    Backwards-compatible with old single-snapshot format:
+    {
+      "timestamp": "...",
+      "total_bsc": 123
+    }
+    """
     try:
-        if os.path.exists(SNAPSHOT_FILE):
-            with open(SNAPSHOT_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+        if not os.path.exists(SNAPSHOT_FILE):
+            return {"entries": []}
+
+        with open(SNAPSHOT_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        if isinstance(data, dict) and isinstance(data.get("entries"), list):
+            entries = []
+            for item in data["entries"]:
+                if isinstance(item, dict) and "timestamp" in item and "total_bsc" in item:
+                    entries.append({
+                        "timestamp": str(item["timestamp"]),
+                        "total_bsc": int(item["total_bsc"]),
+                    })
+            return {"entries": entries}
+
+        if isinstance(data, dict) and "timestamp" in data and "total_bsc" in data:
+            return {
+                "entries": [{
+                    "timestamp": str(data["timestamp"]),
+                    "total_bsc": int(data["total_bsc"]),
+                }]
+            }
+
     except Exception:
         pass
-    return {}
+
+    return {"entries": []}
 
 
-def save_snapshot(total_bsc: int):
-    payload = {
-        "timestamp": datetime.now().isoformat(),
-        "total_bsc": int(total_bsc),
-    }
+def save_snapshot_history(history: Dict[str, Any]):
     with open(SNAPSHOT_FILE, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
+        json.dump(history, f, ensure_ascii=False, indent=2)
+
+
+def append_snapshot(total_bsc: int):
+    history = load_snapshot_history()
+    entries = history.get("entries", [])
+    entries.append({
+        "timestamp": datetime.now().isoformat(),
+        "total_bsc": int(total_bsc)
+    })
+
+    if len(entries) > MAX_SNAPSHOTS:
+        entries = entries[-MAX_SNAPSHOTS:]
+
+    save_snapshot_history({"entries": entries})
+
+
+def reset_snapshot_history():
+    save_snapshot_history({"entries": []})
+
+
+def calculate_bsc_per_hour_from_history(current_total_bsc: int,
+                                        history: Dict[str, Any],
+                                        min_minutes: float = MIN_SNAPSHOT_MINUTES):
+    """
+    Snapshot-derived BSC/h:
+    - uses the oldest valid snapshot to current value for a smoother average
+    - valid means:
+        * elapsed >= min_minutes
+        * delta_bsc > 0
+    Returns:
+      (rate, info_dict) or (0.0, None)
+    """
+    entries = history.get("entries", [])
+    if not entries:
+        return 0.0, None
+
+    now = datetime.now()
+    valid = []
+
+    for item in entries:
+        try:
+            snap_dt = datetime.fromisoformat(item["timestamp"])
+            snap_total = int(item["total_bsc"])
+            elapsed_hours = (now - snap_dt).total_seconds() / 3600.0
+            delta_bsc = current_total_bsc - snap_total
+            if elapsed_hours >= (min_minutes / 60.0) and delta_bsc > 0:
+                valid.append({
+                    "timestamp": snap_dt,
+                    "total_bsc": snap_total,
+                    "elapsed_hours": elapsed_hours,
+                    "delta_bsc": delta_bsc,
+                    "rate": delta_bsc / elapsed_hours
+                })
+        except Exception:
+            continue
+
+    if not valid:
+        return 0.0, None
+
+    valid.sort(key=lambda x: x["timestamp"])
+    chosen = valid[0]
+    return chosen["rate"], chosen
+
+
+def format_snapshot_entry(entry: dict, index: int) -> str:
+    ts_raw = str(entry.get("timestamp", ""))
+    total = safe_int(entry.get("total_bsc", 0), 0)
+
+    try:
+        dt = datetime.fromisoformat(ts_raw)
+        ts_text = dt.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        ts_text = ts_raw
+
+    return f"[{index}] {ts_text}   total_bsc={fmt_int(total)}"
+
+
+def delete_snapshot_entries_by_indices(indices_to_delete):
+    history = load_snapshot_history()
+    entries = history.get("entries", [])
+    if not entries:
+        return 0
+
+    kill = set(indices_to_delete)
+    new_entries = [entry for i, entry in enumerate(entries) if i not in kill]
+    deleted = len(entries) - len(new_entries)
+
+    save_snapshot_history({"entries": new_entries})
+    return deleted
+
+
+def open_snapshot_manager(parent=None):
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+    except Exception:
+        return
+
+    win = tk.Toplevel(parent)
+    win.title("Snapshot Manager")
+    win.geometry("780x460")
+    win.minsize(700, 380)
+
+    tk.Label(
+        win,
+        text="Select one or more snapshot entries to delete.",
+        anchor="w"
+    ).pack(fill="x", padx=10, pady=(10, 4))
+
+    tk.Label(
+        win,
+        text="Tip: newest entries are shown first.",
+        anchor="w",
+        fg="#666666"
+    ).pack(fill="x", padx=10, pady=(0, 8))
+
+    frame = tk.Frame(win)
+    frame.pack(fill="both", expand=True, padx=10, pady=6)
+
+    scrollbar = tk.Scrollbar(frame)
+    scrollbar.pack(side="right", fill="y")
+
+    listbox = tk.Listbox(
+        frame,
+        selectmode=tk.EXTENDED,
+        yscrollcommand=scrollbar.set,
+        width=100,
+        height=18
+    )
+    listbox.pack(side="left", fill="both", expand=True)
+    scrollbar.config(command=listbox.yview)
+
+    info_var = tk.StringVar(value="")
+    tk.Label(win, textvariable=info_var, anchor="w").pack(fill="x", padx=10, pady=(4, 8))
+
+    row_to_original_index = []
+
+    def refresh_list():
+        nonlocal row_to_original_index
+        listbox.delete(0, tk.END)
+
+        history = load_snapshot_history()
+        entries = history.get("entries", [])
+
+        if not entries:
+            row_to_original_index = []
+            info_var.set("No snapshots found.")
+            return
+
+        row_to_original_index = []
+        for original_idx in reversed(range(len(entries))):
+            row_to_original_index.append(original_idx)
+            entry = entries[original_idx]
+            listbox.insert(tk.END, format_snapshot_entry(entry, original_idx))
+
+        info_var.set(f"{len(entries)} snapshot(s) loaded.")
+
+    def delete_selected():
+        sel = listbox.curselection()
+        if not sel:
+            messagebox.showinfo("Nothing selected", "Please select one or more snapshot entries first.")
+            return
+
+        original_indices = [row_to_original_index[row] for row in sel]
+
+        confirm = messagebox.askyesno(
+            "Delete snapshots",
+            f"Delete {len(original_indices)} selected snapshot(s)?"
+        )
+        if not confirm:
+            return
+
+        deleted = delete_snapshot_entries_by_indices(original_indices)
+        refresh_list()
+        messagebox.showinfo("Done", f"Deleted {deleted} snapshot(s).")
+
+    def delete_all():
+        history = load_snapshot_history()
+        entries = history.get("entries", [])
+        if not entries:
+            messagebox.showinfo("No snapshots", "There are no snapshots to delete.")
+            return
+
+        confirm = messagebox.askyesno(
+            "Delete all snapshots",
+            f"Delete ALL {len(entries)} snapshot(s)?"
+        )
+        if not confirm:
+            return
+
+        save_snapshot_history({"entries": []})
+        refresh_list()
+        messagebox.showinfo("Done", "All snapshots deleted.")
+
+    btns = tk.Frame(win)
+    btns.pack(fill="x", padx=10, pady=(4, 12))
+
+    btn_style = {"height": 2, "padx": 12, "pady": 6}
+
+    tk.Button(btns, text="Refresh", command=refresh_list, **btn_style).pack(side="left")
+    tk.Button(btns, text="Delete selected", command=delete_selected, **btn_style).pack(side="left", padx=6)
+    tk.Button(btns, text="Delete all", command=delete_all, **btn_style).pack(side="left", padx=6)
+    tk.Button(btns, text="Close", command=win.destroy, **btn_style).pack(side="right")
+
+    refresh_list()
 
 
 # ========= Log parsing =========
@@ -279,7 +524,7 @@ def show_config_dialog(defaults: dict):
     v_event_gold = tk.StringVar(value=str(defaults.get("event_gold_id", 175)))
     v_event_no_bc_tokens = tk.BooleanVar(value=bool(defaults.get("event_no_bc_tokens", True)))
 
-    # ETA
+    # ETA / snapshot
     v_eta_enable = tk.BooleanVar(value=bool(defaults.get("eta_enable", False)))
     v_eta_bsc_per_hour = tk.StringVar(value=str(defaults.get("eta_bsc_per_hour", "")))
     v_eta_use_snapshot = tk.BooleanVar(value=bool(defaults.get("eta_use_snapshot", False)))
@@ -342,7 +587,7 @@ def show_config_dialog(defaults: dict):
             messagebox.showinfo(
                 "Extracted",
                 "Extracted values from newest getuserdetails line.\n"
-                "Stored only if 'Save user_id/hash' is checked."
+                "They are only stored if 'Save user_id/hash' is checked."
             )
         except Exception as e:
             messagebox.showerror("Error", f"Failed to extract from log:\n{e}")
@@ -375,7 +620,6 @@ def show_config_dialog(defaults: dict):
         }
 
         to_save = dict(run_cfg)
-        # don't persist one-shot action
         to_save.pop("save_snapshot_on_run", None)
 
         if v_save_creds.get():
@@ -468,13 +712,29 @@ def show_config_dialog(defaults: dict):
     row_label("Manual BSC/h", r); row_entry(v_eta_bsc_per_hour, r, width=20)
 
     r += 1
+    tk.Label(
+        root,
+        text="Format: 1800  or  1800.5  or  1800,5",
+        fg="#666666"
+    ).grid(row=r, column=1, sticky="w", padx=8, pady=(0, 4))
+
+    r += 1
     tk.Checkbutton(root, text="Use snapshot-derived BSC/h", variable=v_eta_use_snapshot).grid(
         row=r, column=0, columnspan=3, sticky="w", padx=8, pady=4
     )
 
     r += 1
     tk.Checkbutton(root, text="Save snapshot on this run", variable=v_save_snapshot_on_run).grid(
-        row=r, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 8)
+        row=r, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 4)
+    )
+
+    r += 1
+    snap_count = len(load_snapshot_history().get("entries", []))
+    tk.Label(root, text=f"Snapshots stored: {snap_count}", anchor="w").grid(
+        row=r, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 4)
+    )
+    tk.Button(root, text="Manage snapshots...", command=lambda: open_snapshot_manager(root)).grid(
+        row=r, column=2, padx=8, pady=(0, 4), sticky="e"
     )
 
     r += 1
@@ -524,7 +784,14 @@ if _args.headless:
         _cfg["eta_bsc_per_hour"] = str(_args.eta_bsc_per_hour)
     if _args.eta_use_snapshot:
         _cfg["eta_use_snapshot"] = True
+
     _cfg["save_snapshot_on_run"] = bool(_args.save_snapshot)
+
+    if _args.reset_snapshots:
+        try:
+            reset_snapshot_history()
+        except Exception:
+            pass
 
     _cfg.setdefault("log_path", LOG_PATH)
     _cfg.setdefault("output_path", OUTPUT_PATH)
@@ -560,7 +827,11 @@ with open(LOG_PATH, "r", encoding="utf-8") as f:
 
 line = find_latest_getuserdetails_line(log_text)
 if not line and not (USER_ID_OVERRIDE and HASH_OVERRIDE and API_URL_OVERRIDE):
-    raise Exception("Could not find a 'getuserdetails' line and no overrides provided.")
+    raise Exception(
+        "Could not find a 'getuserdetails' line in the log file and no manual overrides were provided.\n"
+        f"Checked log path: {LOG_PATH}\n"
+        "Please start the game and use 'Extract from log', or provide user_id/hash/api_url manually."
+    )
 
 api_url = API_URL_OVERRIDE or (extract_post_url_from_line(line) if line else None)
 kv = parse_kv_from_line(line) if line else {}
@@ -600,6 +871,7 @@ resp = requests.post(api_url, data=params, headers=headers, timeout=30, verify=c
 if resp.status_code != 200 or not resp.text.strip().startswith("{"):
     snippet = resp.text[:200].replace("\n", " ")
     raise Exception(f"Invalid API response: {resp.status_code} | {snippet}")
+
 data = resp.json()
 
 # ========= Values =========
@@ -621,6 +893,7 @@ BSC_WEIGHTS = {31: 1, 32: 2, 33: 6, 34: 24, 1797: 120}
 
 def find_contract_buffs_anywhere(obj):
     if isinstance(obj, list):
+        # list of buffs?
         if obj and isinstance(obj[0], dict) and 'buff_id' in obj[0] and 'inventory_amount' in obj[0]:
             return obj
         for item in obj:
@@ -673,21 +946,14 @@ eta_source = None
 eta_text = None
 
 if ETA_ENABLE:
+    # Snapshot has priority; manual only as fallback
     if ETA_USE_SNAPSHOT:
-        snap = load_snapshot()
-        snap_total = safe_int(snap.get("total_bsc", 0), 0)
-        snap_ts_raw = snap.get("timestamp")
-        try:
-            snap_dt = datetime.fromisoformat(snap_ts_raw) if snap_ts_raw else None
-        except Exception:
-            snap_dt = None
-
-        if snap_dt is not None:
-            elapsed_hours = (datetime.now() - snap_dt).total_seconds() / 3600.0
-            delta_bsc = current_total_bsc - snap_total
-            if elapsed_hours > 0 and delta_bsc > 0:
-                eta_bsc_per_hour = delta_bsc / elapsed_hours
-                eta_source = "snapshot"
+        history = load_snapshot_history()
+        rate, info = calculate_bsc_per_hour_from_history(current_total_bsc, history)
+        if rate > 0:
+            eta_bsc_per_hour = rate
+            snap_count = len(history.get("entries", []))
+            eta_source = f"snapshot avg, {snap_count} snaps"
 
     if eta_bsc_per_hour <= 0 and ETA_BSC_PER_HOUR_MANUAL > 0:
         eta_bsc_per_hour = ETA_BSC_PER_HOUR_MANUAL
@@ -700,7 +966,7 @@ if ETA_ENABLE:
 
 if SAVE_SNAPSHOT_ON_RUN:
     try:
-        save_snapshot(current_total_bsc)
+        append_snapshot(current_total_bsc)
     except Exception:
         pass
 
@@ -979,7 +1245,6 @@ def draw_stacked_bsc_block(y, segments, goal, title, icon=None, eta_text=None):
         if used_px >= BAR_WIDTH:
             break
 
-    # Legend with colored boxes, constrained to BAR_WIDTH
     legend_y = bar_y + BAR_HEIGHT + LEGEND_GAP
     lx = bar_x
     x_limit = bar_x + BAR_WIDTH
