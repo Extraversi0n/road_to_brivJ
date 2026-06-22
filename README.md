@@ -162,3 +162,256 @@ The total bar stacks all active BSC contributions into one combined progress bar
 
 ```bash
 pip install -r requirements.txt
+```
+
+Alternatively:
+
+```bash
+pip install pillow requests certifi
+```
+
+---
+
+## Headless / CLI Usage
+
+### Python example
+
+```bat
+pythonw.exe progress_tracker_extended.py --headless --percent-style locale
+```
+
+### EXE example
+
+```bat
+IdleChampsOverlay.exe --headless --percent-style locale --goal-bsc 15360005 --output "C:\Overlay\overlay_extended.png"
+```
+
+### Example with snapshot saving enabled
+
+```bat
+IdleChampsOverlay.exe --headless --percent-style locale --save-snapshot --output "C:\Overlay\overlay_extended.png"
+```
+
+### Example with snapshot ETA enabled
+
+```bat
+IdleChampsOverlay.exe --headless --percent-style locale --eta-enable --eta-use-snapshot --output "C:\Overlay\overlay_extended.png"
+```
+
+---
+
+## CLI Flags
+
+```text
+--headless
+    Run without GUI
+
+--log-path PATH
+    Path to webRequestLog.txt
+
+--output PATH
+    Output PNG path
+
+--goal-bsc INT
+    Target in BSC units
+
+--user-id ID
+    Override user_id
+
+--hash VALUE
+    Override hash
+
+--api-url URL
+    Override post.php URL
+
+--percent-style [locale|dot|int]
+    Percentage style:
+    - locale = OS locale decimal separator
+    - dot    = always dot
+    - int    = rounded integer percent
+
+--event-enable
+    Enable Champion/Event chest contribution
+
+--event-name TEXT
+    Champion/Event label used in the total bar
+
+--event-silver-id INT
+    Event silver chest ID
+
+--event-gold-id INT
+    Event gold chest ID
+
+--event-no-bc-tokens
+    Use Gear + BSC only (without BC Tokens) for event gold chest average
+
+--eta-enable
+    Enable ETA / Days Remaining
+
+--eta-bsc-per-hour FLOAT
+    Manual BSC/h value
+
+--eta-use-snapshot
+    Use snapshot-derived BSC/h when valid
+
+--save-snapshot
+    Save a snapshot on this run
+
+--reset-snapshots
+    Clear snapshot history before running
+```
+
+---
+
+## Manual BSC/h Format
+
+The manual `BSC/h` field accepts all of the following formats:
+
+- `1800`
+- `1800.5`
+- `1800,5`
+
+If a valid snapshot-derived rate is available, it is used first.  
+The manual value is only used as a fallback.
+
+---
+
+## Snapshot System
+
+Snapshots are stored locally in:
+
+```text
+bsc_snapshot.json
+```
+
+Each snapshot stores:
+- a timestamp
+- the total BSC at that time
+
+The tool can use this history to calculate an average **BSC per hour**.
+
+### Snapshot Manager
+The GUI includes a **Snapshot Manager** where you can:
+- inspect stored snapshots
+- delete selected snapshots
+- delete all snapshots
+
+---
+
+## Icons & Cache
+
+Downloaded icon PNGs are cached locally in:
+
+```text
+overlay_icon_cache/
+```
+
+If icon downloads fail, the overlay still renders — just without icons.
+
+---
+
+## Config & Privacy
+
+Settings are stored locally in:
+
+```text
+tracker_config.json
+```
+
+### Important
+- `user_id` and `hash` are **only saved if you explicitly enable**
+  **“Save user_id/hash to config (local)”**
+- If that option is disabled again, those values are removed from the config
+- This makes it safer to share the repository or distribute builds
+
+---
+
+## Recommended `.gitignore`
+
+These local/runtime files should **not** be committed:
+
+```gitignore
+tracker_config.json
+bsc_snapshot.json
+overlay_icon_cache/
+overlay_extended.png
+build/
+dist/
+*.spec
+__pycache__/
+*.py[cod]
+.venv/
+env/
+venv/
+```
+
+---
+
+## Windows Task Scheduler Example
+
+### Program/script
+```text
+C:\Path\To\IdleChampsOverlay.exe
+```
+
+### Add arguments
+```text
+--headless --percent-style locale --output "C:\Overlay\overlay_extended.png"
+```
+
+### Start in
+```text
+C:\Path\To\
+```
+
+Make sure **Start in** points to the folder where the EXE lives so that local config, cache, and output behave correctly.
+
+### Optional example with snapshots
+```text
+--headless --percent-style locale --save-snapshot --eta-enable --eta-use-snapshot --output "C:\Overlay\overlay_extended.png"
+```
+
+---
+
+## Troubleshooting
+
+### “Could not find a `getuserdetails` line…”
+- Start the game
+- verify the correct log path
+- use **Extract from log**
+- or provide `user_id`, `hash`, and `api_url` manually
+
+### ETA uses manual BSC/h instead of snapshots
+This usually means snapshot data is not usable yet, for example:
+- no snapshots exist
+- not enough time has passed
+- total BSC has not increased since the older snapshot
+
+### Icons are missing
+If needed, delete:
+
+```text
+overlay_icon_cache/
+```
+
+and run again so the icons can be downloaded again.
+
+---
+
+## Sharing / Safety
+
+If you share this project with others:
+
+- **do not commit** `tracker_config.json`
+- **do not commit** `bsc_snapshot.json`
+- do not include personal/local files in release zips
+
+---
+
+## License
+
+Use, adapt, and share responsibly.
+
+---
+
+Enjoy the Briv grind 🙂
